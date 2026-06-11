@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import numpy as np; T = np.load\\('c:/github_codes/C_SRS_DKT_element/mesh_triangles.npy'\\); print\\('shape:', T.shape\\); print\\('dtype:', T.dtype\\); print\\('first 5 rows:\\\\n', T[:5]\\)\")",
+      "Bash(python -c ' *)"
+    ]
+  }
+}
