@@ -639,17 +639,21 @@ def generate_rectangular_traj(wayPoints, n_interp):
     return traj
 
 def clamp_diff(cmd_diff, min_bound = 5e-4, max_bound = 1e-2):
-    max_diff = np.max(np.abs(cmd_diff))
+    # max_diff = np.max(np.abs(cmd_diff))
     min_diff = 0
     ratio = 1.0
     for i in range(len(cmd_diff)):
         if abs(cmd_diff[i]) > 0 and (min_diff == 0 or abs(cmd_diff[i]) < min_diff):
             min_diff = abs(cmd_diff[i])
+
     if min_diff < min_bound and min_diff > 1e-8:
         ratio = min_bound / min_diff
-    if max_diff * ratio > max_bound:  # check effective max after any scale-up
-        ratio = max_bound / max_diff
     cmd_diff_new = [cmd_diff[i] * ratio for i in range(len(cmd_diff))]
+    ratio = 1.0
+    max_diff = np.max(np.abs(cmd_diff_new))
+    if max_diff > max_bound:  # check effective max after any scale-up
+        ratio = max_bound / max_diff
+    cmd_diff_new = [cmd_diff_new[i] * ratio for i in range(len(cmd_diff_new))]
     return cmd_diff_new
 
 if __name__ == '__main__':

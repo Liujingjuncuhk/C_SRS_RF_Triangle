@@ -173,7 +173,9 @@ def build_RF_matrix(triangles):
 # 4. Run
 # ----------------------------------------------------------------------
 if __name__ == "__main__":
-    DXF_PATH = "./models/flat_tri_surface/flat_tri_surface.dxf"          # <-- your file
+    # DXF_PATH = "./models/flat_tri_surface/flat_tri_surface.dxf"          # <-- your file
+    DXF_PATH = "./models/flying_carpet/flying_carpet_tri.dxf" 
+    folder = "./models/flying_carpet/"
     MAX_AREA = 100            # e.g. 5.0 to control density; None = coarse
 
     boundary = extract_boundary(DXF_PATH)
@@ -185,9 +187,9 @@ if __name__ == "__main__":
     print(f"RF matrix: {RF.shape}, boundary edges: {boundary_edges}")
     print("mesh_vertices: ", V)
     # save
-    # np.save("mesh_vertices.npy", V)
-    # np.save("mesh_triangles.npy", T)
-    # np.save("mesh_RF_triangles.npy", RF)
+    np.save(folder + "mesh_vertices.npy", V)
+    np.save(folder + "mesh_triangles.npy", T)
+    np.save(folder + "mesh_RF_triangles.npy", RF)
 
     # plot
     plt.figure(figsize=(7, 7))

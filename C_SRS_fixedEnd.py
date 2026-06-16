@@ -5,7 +5,9 @@ import pyvista as pv
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 from scipy.linalg import lu_factor, lu_solve
-
+import torch
+import torch.nn as nn
+import joblib
 class C_SRS_fixedEnd:
     def __init__(self, description_file):
         with open(description_file, 'rb') as f:
@@ -91,11 +93,12 @@ class C_SRS_fixedEnd:
         print("number of moving vertices: ", self.nMoving)
         self.initial_cable_vec = self.get_cable_vec(self.vertices)
         self.assemble_CG_matrices()
+        self.load_ws()
+        self.ikModel = IK_MLP()
         # exit(0)
 
     def assemble_CG_matrices(self):
         matA_size = 0
-        # weight_cable is the max for all element in self.neighbour_edge_weight_list, multiplied by 10 for safety
         max_weight = 0
         for i in range(self.num_vertices):
             for weight in self.neighbour_edge_weight_list[i]:
@@ -164,7 +167,6 @@ class C_SRS_fixedEnd:
             ARAP_shape_list[self.idxAll_2_idxMoving[i]] = ARAP_shape
         return ARAP_shape_list
 
-
     def get_rotation_ARAP(self, ARAP_shape_list):
         R_list = [np.eye(3) for _ in range(self.nMoving)]
         for i in range(self.nMoving):
@@ -197,7 +199,6 @@ class C_SRS_fixedEnd:
             R = np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * K @ K
             R_list[i] = R
         return R_list
-
 
     def get_Bvec_CG(self, R_list_CG, R_list_cable, tar_cable_length):
         matA_shape = self.matA_all.shape[0]
@@ -323,7 +324,7 @@ class C_SRS_fixedEnd:
             if diff < tol and min(phi_Qfree.flatten()) > -1e-3:
                 diff_count += 1
                 if diff_count >= 10:
-                    # print(f"Converged at time {t_a:.2f} with diff {diff:.6f} for 10 consecutive steps, stopping simulation.")
+                    print(f"Converged at time {t_a:.2f} with diff {diff:.6f} for 10 consecutive steps, stopping simulation.")
                     break
             t3 = time.time()
             # print(f"t_a: {t_a:.3f}, diff: {diff:.7f}, time for R_list: {t1-t0:.4f}s, time for K_mat: {t2-t1:.4f}s, total time for this step: {t3-t0:.4f}s")
@@ -332,7 +333,33 @@ class C_SRS_fixedEnd:
         vert_length = self.q_to_vertices(Q_a)
         return Q_list, vert_length, cable_tension
 
-    def IKD_single(self, target_ee_pos, starting_vertices, AA = True, tol = 1e-3):
+    # def FKD_static(self, target_cable_length, starting_vertices,max_iter = 100, tol = 1e-5):
+    #     if starting_vertices.shape[0] == 3*self.num_vertices:
+    #         Q_a = starting_vertices.copy()
+    #     elif starting_vertices.shape[0] == self.num_vertices:
+    #         Q_a = self.vertices_to_q(starting_vertices)
+    #     else:
+    #         raise ValueError("starting_vertices should be either a 3n vector or an n by 3 array.")
+    #     pass
+    #     Q_a = Q_a.reshape((3*self.num_vertices, ))
+
+    #     phi_Qfree = np.zeros((self.nCable, 1))
+    #     H_free = np.zeros((self.nCable, 3*self.num_vertices))
+    #     Q_list = [Q_a.copy()]
+    #     for num_iter in range(max_iter):
+    #         Q_a_last = Q_a.copy()
+    #         R_list, R_list_1818 = self.get_R_list(self.q_to_vertices(Q_a))
+    #         K_mat, f0 = self.assemble_K(R_list_1818)
+    #         Q_free = solve_with_known_values(K_mat, f0+self.gravity_vec, self.idxAll_2_idxMoving, self.idxMoving_2_idxAll)
+    #         for i in range(self.nCable):
+    #             idx_pp = self.pp_idx[i]
+    #             unit_vec = (self.pulley_location[i,:] - Q_free[3*idx_pp:(3*idx_pp+3)].reshape((3,)))
+    #             unit_vec = unit_vec / np.linalg.norm(unit_vec)
+    #             phi_Qfree[i] = target_cable_length[i] - np.linalg.norm(self.pulley_location[i] - Q_free[3*idx_pp:3*idx_pp+3].reshape((3,)))
+    #             H_free[i, 3*idx_pp:3*idx_pp+3] = unit_vec
+            
+
+    def IKD_single(self, target_ee_pos, starting_vertices, AA = False, tol = 1e-3):
         idx_ee = self.ee_idx[0]
         idx_ee_moving = self.idxAll_2_idxMoving[idx_ee]
         max_iter = 100
@@ -398,6 +425,7 @@ class C_SRS_fixedEnd:
         cur_length = self.get_cable_length(Q)
         Q_list, starting_vertices, cable_tension = self.FKD_time(cur_length, 1, starting_vertices)
         Q = self.vertices_to_q(starting_vertices)
+        Q_list_final = [Q.copy()]
         for i in range(max_iter):
             dl = 0.5
             jac = get_jacobian(Q)
@@ -409,11 +437,11 @@ class C_SRS_fixedEnd:
             # alpha = 10
             # dl = alpha*diff/(np.max(np.abs(jac))+1e-6)
             for k in range(self.nCable):
-                if cable_tension[k] > 1e-5: # only update if the cable is taut
-                    cmd_diff[k] = -dl * jac[k]
-                else:
+                if cable_tension[k] < 1e-5 and jac[k] < 0:
                     cmd_diff[k] = 0
-            cmd_diff = clamp_diff(cmd_diff, min_bound = 1e-3, max_bound = 0.02)
+                else:
+                    cmd_diff[k] = -dl * jac[k]
+            cmd_diff = clamp_diff(cmd_diff, min_bound = 1e-3, max_bound = 5e-3)
             for k in range(self.nCable):
                 cmd_length[k] += cmd_diff[k]
             Q_list, starting_vertices, cable_tension = self.FKD_time(cmd_length, 1, Q)
@@ -439,11 +467,13 @@ class C_SRS_fixedEnd:
                     Q = self.vertices_to_q(starting_vertices)
             diff = np.sqrt(2*diff)
             print("Iteration {}: diff = {}, dl = {}, Jacobian: {}, cmd_diff: {}".format(i, diff, dl, np.round(jac, 5), np.round(cmd_diff, 5)))
+            # self.visualize_IKD_result(self.q_to_vertices(Q), target_ee_pos)
+            Q_list_final.append(Q.copy())
             if diff < tol:
                 print("Converged at iteration {} with diff {}".format(i, diff))
                 break
             cur_length = self.get_cable_length(Q)
-        return cur_length, starting_vertices
+        return cur_length, starting_vertices, Q_list_final
 
     def generate_ws(self, cable_length_ranges, total_number = 1000, saveFile = 'training_data_1.pkl'):
         def generate_ws_cl_input(cable_length_ranges, total_number):
@@ -469,8 +499,6 @@ class C_SRS_fixedEnd:
             data_list.append(data)
         with open(saveFile, 'wb') as f:
             pickle.dump(data_list, f)
-
-        
 
     # def IKD_single_AA(self, target_ee_pos, starting_vertices, tol = 1e-3):
     #     # add anderson acceleration to IKD_single
@@ -812,6 +840,71 @@ class C_SRS_fixedEnd:
         plotter.add_legend()
         plotter.show()
 
+    def visualize_ws(self, vertices, ws_pts):
+        mesh = pv.PolyData(vertices, np.hstack((np.full((self.mesh_triangles.shape[0], 1), 3), self.mesh_triangles)))
+
+        plotter = pv.Plotter()
+        plotter.add_mesh(mesh, color='lightgray', show_edges=True)
+        plotter.add_points(vertices[self.pp_idx], color='blue', point_size=10
+                            , label='Pullpoints')
+        plotter.add_points(self.pulley_location, color='blue', point_size=10
+                            , label='Pulleys')
+        # add lines between pullpoints and pulleys
+        for i in range(len(self.pp_idx)):
+            plotter.add_lines(np.array([vertices[self.pp_idx[i]], self.pulley_location[i]]), color='blue', width=2)
+        # annotate ee vertices
+        plotter.add_points(vertices[self.ee_idx], color='red', point_size=10, label='End Effectors')
+        # add all points in ws_pts as cyan points
+        plotter.add_points(ws_pts, color='cyan', point_size=5, label='WS Points')
+
+        # make fixed idx black
+        plotter.add_points(vertices[self.fixed_idx], color='black', point_size=10, label='Fixed Vertices')
+        # add grid
+        plotter.show_grid()
+        plotter.show_axes()
+        plotter.add_legend()
+        plotter.show()
+
+    def visualize_planned_traj(self, vertices, traj):
+        mesh = pv.PolyData(vertices, np.hstack((np.full((self.mesh_triangles.shape[0], 1), 3), self.mesh_triangles)))
+        ws_pts = np.array(self.ee_pos_list)
+        plotter = pv.Plotter()
+        plotter.add_mesh(mesh, color='lightgray', show_edges=True)
+        plotter.add_points(vertices[self.pp_idx], color='blue', point_size=10
+                            , label='Pullpoints')
+        plotter.add_points(self.pulley_location, color='blue', point_size=10
+                            , label='Pulleys')
+        # add lines between pullpoints and pulleys
+        for i in range(len(self.pp_idx)):
+            plotter.add_lines(np.array([vertices[self.pp_idx[i]], self.pulley_location[i]]), color='blue', width=2)
+        # annotate ee vertices
+        plotter.add_points(vertices[self.ee_idx], color='red', point_size=10, label='End Effectors')
+        # add all points in ws_pts as cyan points
+        plotter.add_points(ws_pts, color='cyan', point_size=5, label='WS Points', opacity=0.5)
+
+        # make fixed idx black
+        plotter.add_points(vertices[self.fixed_idx], color='black', point_size=10, label='Fixed Vertices')
+
+
+        # traj is a nX3 array, add it as a magenta line
+        # plotter.add_lines(traj, color='magenta', width=2, label='Planned Trajectory')
+        for i in range(traj.shape[0]-1):
+            plotter.add_lines(np.array([traj[i], traj[i+1]]), color='magenta', width=5)
+        plotter.add_lines(np.array([traj[-1], traj[0]]), color='magenta', width=5)
+        # add grid
+        plotter.show_grid()
+        plotter.show_axes()
+        plotter.add_legend()
+        plotter.show()
+
+    def load_ws(self, filePath="./data/training_data_all.pkl"):
+        with open(filePath, 'rb') as f:
+            data = pickle.load(f)
+        self.cl_list = data['cable_length']
+        self.ee_pos_list = data['ee_pos']
+        self.vertices_list = data['vertices']
+        self.cable_tension_list = data['cable_tension']
+
     def replay_Q_list(self, Q_list, filePath="./c_srs_simulation.mp4", framerate=10,
                        window_size=(1024, 768)):
         def _to_vertices(Q):
@@ -874,29 +967,119 @@ class C_SRS_fixedEnd:
 
         plotter.close()
 
+    def replay_IKD_Q_list(self, ee_target_pos, Q_list, filePath="./c_srs_simulation.mp4", framerate=10,
+                       window_size=(1024, 768)):
+        def _to_vertices(Q):
+            if Q.shape[0] == 3 * self.num_vertices:
+                return self.q_to_vertices(Q)
+            return Q
+
+        plotter = pv.Plotter(off_screen=True, window_size=window_size)
+
+        vertices0 = _to_vertices(Q_list[0])
+        faces = np.hstack((np.full((self.mesh_triangles.shape[0], 1), 3), self.mesh_triangles))
+
+        # Build all actors once; update .points in-place each frame
+        surf = pv.PolyData(vertices0.copy(), faces)
+        plotter.add_mesh(surf, color='lightgray', show_edges=True)
+
+        pp_cloud = pv.PolyData(vertices0[self.pp_idx].copy())
+        plotter.add_mesh(pp_cloud, color='blue', point_size=10,
+                         render_points_as_spheres=True, label='Pull points')
+
+        pulley_cloud = pv.PolyData(self.pulley_location.copy())
+        plotter.add_mesh(pulley_cloud, color='cyan', point_size=10,
+                         render_points_as_spheres=True, label='Pulleys')
+
+        ee_cloud = pv.PolyData(vertices0[self.ee_idx].copy())
+        plotter.add_mesh(ee_cloud, color='red', point_size=10,
+                         render_points_as_spheres=True, label='End Effectors')
+
+        fixed_cloud = pv.PolyData(vertices0[self.fixed_idx].copy())
+        plotter.add_mesh(fixed_cloud, color='black', point_size=10,
+                         render_points_as_spheres=True, label='Fixed Vertices')
+
+
+        # add target ee pos as a green point
+        plotter.add_points(ee_target_pos.reshape((1,3)), color='green', point_size=10,
+                         render_points_as_spheres=True, label='Target EE Position')
+        # All cable segments in a single PolyData so points update in-place
+        cable_pts = np.empty((2 * self.nCable, 3))
+        for i in range(self.nCable):
+            cable_pts[2 * i]     = vertices0[self.pp_idx[i]]
+            cable_pts[2 * i + 1] = self.pulley_location[i]
+        cable_lines = np.array([[2, 2 * i, 2 * i + 1]
+                                 for i in range(self.nCable)]).flatten()
+        cables = pv.PolyData()
+        cables.points = cable_pts.copy()
+        cables.lines = cable_lines
+        plotter.add_mesh(cables, color='blue', line_width=2)
+
+        plotter.show_grid()
+        plotter.show_axes()
+        plotter.add_legend()
+        plotter.open_movie(filePath, framerate=framerate)
+
+        for Q in Q_list:
+            vertices = _to_vertices(Q)
+            surf.points = vertices.copy()
+            pp_cloud.points = vertices[self.pp_idx].copy()
+            ee_cloud.points = vertices[self.ee_idx].copy()
+            fixed_cloud.points = vertices[self.fixed_idx].copy()
+            for i in range(self.nCable):
+                cable_pts[2 * i] = vertices[self.pp_idx[i]]
+            cables.points = cable_pts.copy()
+            plotter.write_frame()
+
+        plotter.close()
+
+
+
+class IK_MLP(nn.Module):
+    def __init__(self, dropout=0.1):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(3,   128), nn.ReLU(), nn.Dropout(dropout),
+            nn.Linear(128, 256), nn.ReLU(), nn.Dropout(dropout),
+            nn.Linear(256, 128), nn.ReLU(), nn.Dropout(dropout),
+            nn.Linear(128,   6),
+        )
+        self.load_state_dict(torch.load("./learning_model/ik_model_best.pth"))
+    def forward(self, x):
+        return self.net(x)
+    
+    def predict_cable_length(self, ee_pos):
+        scaler_X = joblib.load("./learning_model/scaler_X.pkl")
+        scaler_Y = joblib.load("./learning_model/scaler_Y.pkl")
+        """ee_pos: (3,) array in metres. Returns (6,) cable lengths in metres."""
+        x = scaler_X.transform(ee_pos.reshape(1, 3))
+        x_t = torch.tensor(x, dtype=torch.float32)
+        with torch.no_grad():
+            y_norm = self(x_t).numpy()
+        return scaler_Y.inverse_transform(y_norm).flatten()
 
 if __name__ == "__main__":
     description_file = "./models/flat_tri_surface/C_SRS_description.pkl"
     c_srs = C_SRS_fixedEnd(description_file)
     icl = c_srs.initial_cable_length.copy()
-    cl_range_1 = [[icl[0]-0.08, icl[0]-0.02], 
-                [icl[1]-0.08, icl[1]-0.02],
-                [icl[2]-0.08, icl[2]-0.02],
-                [icl[3], icl[3]+0.05],
-                [icl[4], icl[4]+0.05],
-                [icl[5], icl[5]+0.05]]
+    # cl_range_1 = [[icl[0]-0.08, icl[0]-0.02], 
+    #             [icl[1]-0.08, icl[1]-0.02],
+    #             [icl[2]-0.08, icl[2]-0.02],
+    #             [icl[3], icl[3]+0.05],
+    #             [icl[4], icl[4]+0.05],
+    #             [icl[5], icl[5]+0.05]]
     
-    cl_range_2 = [[icl[0]-0.03, icl[0]+0.01], 
-                [icl[1]-0.03, icl[1]+0.01],
-                [icl[2]-0.03, icl[2]+0.01],
-                [icl[3]-0.04, icl[3]+0.01],
-                [icl[4]-0.04, icl[4]+0.01],
-                [icl[5]-0.04, icl[5]+0.01]]
-    c_srs.generate_ws(cl_range_1, total_number=2, saveFile='training_data_1.pkl')
-    c_srs.generate_ws(cl_range_2, total_number=2, saveFile='training_data_2.pkl')
-    exit(0)
-    tcl = [icl[0]-0.03, icl[1]-0.03, icl[2]-0.03, icl[3]-0.04, icl[4]-0.04, icl[5]-0.04]
-    Q_list, vert_length, cable_tension = c_srs.FKD_time(tcl, 1, c_srs.vertices, tol = 1e-5)
+    # cl_range_2 = [[icl[0]-0.03, icl[0]+0.01], 
+    #             [icl[1]-0.03, icl[1]+0.01],
+    #             [icl[2]-0.03, icl[2]+0.01],
+    #             [icl[3]-0.04, icl[3]+0.01],
+    #             [icl[4]-0.04, icl[4]+0.01],
+    #             [icl[5]-0.04, icl[5]+0.01]]
+    # c_srs.generate_ws(cl_range_1, total_number=1000, saveFile='training_data_1.pkl')
+    # c_srs.generate_ws(cl_range_2, total_number=1000, saveFile='training_data_2.pkl')
+    # exit(0)
+    tcl = [icl[0]-0.01, icl[1]-0.01, icl[2]-0.01, icl[3], icl[4], icl[5]]
+    Q_list, vert_length, cable_tension = c_srs.FKD_time(tcl, 1, c_srs.vertices, tol = 1e-4)
     print("cable tension: ", cable_tension)
     c_srs.visualize_vert(vert_length)
     exit(0)
