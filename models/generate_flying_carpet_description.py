@@ -271,7 +271,70 @@ def visualize_3d_mesh(mesh_vertices, mesh_triangles, pp_idx, pulley_locations,ee
     plotter.show()
 
 
+def build_RF_matrix(triangles):
+    local_edges = [(0, 1), (1, 2), (2, 0)]
+    edge_map = {}
+    for ti, tri in enumerate(triangles):
+        for i, j in local_edges:
+            a, b = int(tri[i]), int(tri[j])
+            opp = int(tri[3 - i - j])
+            key = frozenset((a, b))
+            if key not in edge_map:
+                edge_map[key] = []
+            edge_map[key].append((ti, opp))
+    rf = np.full((len(triangles), 6), -1, dtype=np.int32)
+    rf[:, :3] = triangles
+    for ti, tri in enumerate(triangles):
+        for col, (i, j) in enumerate(local_edges):
+            key = frozenset((int(tri[i]), int(tri[j])))
+            for nti, nopp in edge_map[key]:
+                if nti != ti:
+                    rf[ti, 3 + col] = nopp
+                    break
+    return rf
+
+
+def find_containing_triangle(mesh_vertices, mesh_triangles, point):
+    px, py = point[0], point[1]
+    for ti, tri in enumerate(mesh_triangles):
+        ax, ay = mesh_vertices[tri[0], 0], mesh_vertices[tri[0], 1]
+        bx, by = mesh_vertices[tri[1], 0], mesh_vertices[tri[1], 1]
+        cx, cy = mesh_vertices[tri[2], 0], mesh_vertices[tri[2], 1]
+        d1 = (px - bx) * (ay - by) - (ax - bx) * (py - by)
+        d2 = (px - cx) * (by - cy) - (bx - cx) * (py - cy)
+        d3 = (px - ax) * (cy - ay) - (cx - ax) * (py - ay)
+        has_neg = (d1 < 0) or (d2 < 0) or (d3 < 0)
+        has_pos = (d1 > 0) or (d2 > 0) or (d3 > 0)
+        if not (has_neg and has_pos):
+            return ti
+    return -1
+
+
 def generate_C_SRS_description(mesh_vertices, mesh_triangles, pullpoint_locations, pulley_locations, density, thickness, Youngs_modulus, Poisson_ratio):
+    
+
+    # Add a new vertex at each pullpoint by splitting the containing triangle into 3
+    pp_idx = []
+    mesh_triangles_list = mesh_triangles.tolist()
+    for i in range(len(pullpoint_locations)):
+        new_vert = pullpoint_locations[i].copy()
+        ti = find_containing_triangle(mesh_vertices, np.array(mesh_triangles_list, dtype=int), new_vert)
+        if ti == -1:
+            dists = np.linalg.norm(mesh_vertices[interior_indices] - new_vert, axis=1)
+            idx = interior_indices[np.argmin(dists)]
+            pp_idx.append(idx)
+            print(f"Warning: pullpoint {i} not inside any triangle, falling back to closest interior vertex {idx}")
+            continue
+        new_idx = len(mesh_vertices)
+        mesh_vertices = np.vstack([mesh_vertices, new_vert.reshape(1, 3)])
+        v0, v1, v2 = mesh_triangles_list[ti][0], mesh_triangles_list[ti][1], mesh_triangles_list[ti][2]
+        mesh_triangles_list[ti] = [v0, v1, new_idx]
+        mesh_triangles_list.append([v1, v2, new_idx])
+        mesh_triangles_list.append([v2, v0, new_idx])
+        pp_idx.append(new_idx)
+    mesh_triangles = np.array(mesh_triangles_list, dtype=int)
+    mesh_RF_triangles_updated = build_RF_matrix(mesh_triangles)
+
     # identify boundary vertices (edges shared by only one triangle)
     edge_count = defaultdict(int)
     for tri in mesh_triangles:
@@ -284,14 +347,6 @@ def generate_C_SRS_description(mesh_vertices, mesh_triangles, pullpoint_location
             boundary_vertex_set.update(edge)
     interior_indices = np.array([i for i in range(len(mesh_vertices)) if i not in boundary_vertex_set])
 
-    # find the closest interior (non-boundary) vertex to each pullpoint
-    pp_idx = []
-    for i in range(len(pullpoint_locations)):
-        dists = np.linalg.norm(mesh_vertices[interior_indices] - pullpoint_locations[i], axis=1)
-        idx = interior_indices[np.argmin(dists)]
-        mesh_vertices[idx] = pullpoint_locations[i]
-        pp_idx.append(idx)
-
     ee_idx = pp_idx.copy() # for this example, we can just set the ee vertices to be the same as pullpoint vertices, since we don't have a specific end-effector shape in mind. In practice, you can specify different ee vertices based on your requirements.
 
     edge_list, weight_list = generate_edge_matrix(mesh_vertices, mesh_triangles)
@@ -299,17 +354,17 @@ def generate_C_SRS_description(mesh_vertices, mesh_triangles, pullpoint_location
     area_list = cal_area_list(mesh_vertices, mesh_triangles)
     initial_SK_list = get_ARAP_initial_SK_list(mesh_vertices, mesh_triangles, edge_list, weight_list, neighbour_list, neighbour_edge_list)
     stiffness_matrices = []
-    for tri in mesh_RF_triangles:
+    for tri in mesh_RF_triangles_updated:
         X = mesh_vertices[tri]
         K = ebst_stiffness(tri, X, Youngs_modulus, Poisson_ratio, thickness)
         stiffness_matrices.append(K)
     mass_mat = cal_mass_matrix(mesh_vertices, mesh_triangles, density, thickness)
     visualize_3d_mesh(mesh_vertices, mesh_triangles, pp_idx, pulley_locations, ee_idx)
-    with open(folder + "C_SRS_description.pkl", "wb") as f:
+    with open(folder + "flying_carpet_description.pkl", "wb") as f:
         pickle.dump({
             "mesh_vertices": mesh_vertices,
             "mesh_triangles": mesh_triangles,
-            "mesh_RF_triangles": mesh_RF_triangles,
+            "mesh_RF_triangles": mesh_RF_triangles_updated,
             "edge_list": edge_list,
             "weight_list": weight_list,
             "neighbour_list": neighbour_list,

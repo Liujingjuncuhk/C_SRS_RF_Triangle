@@ -21,7 +21,7 @@ if __name__ == "__main__":
     flying_carpet = Flying_carpet(description_file)
     
     icl = flying_carpet.initial_cable_length
-    shortened_length = 0.04
+    shortened_length = 0.08
     tcl = [icl[0]-shortened_length, icl[1]-shortened_length, icl[2]-shortened_length, icl[3]-shortened_length, icl[4], icl[5], icl[6], icl[7]]
     Q_list, vert_length, cable_tension = flying_carpet.FKD_time(tcl, 1, flying_carpet.vertices, tol = 2e-5)
     flying_carpet.visualize_vert(vert_length)

@@ -261,8 +261,7 @@ class C_SRS_fixedEnd:
                 break
         return cur_vertices
 
-        
-    def FKD_time(self, target_cable_length, total_time, starting_vertices, tol = 2e-5):
+    def FKD_time(self, target_cable_length, total_time, starting_vertices, tol = 2e-5, show_info = False):
         if starting_vertices.shape[0] == 3*self.num_vertices:
             Q_a = starting_vertices.copy()
         elif starting_vertices.shape[0] == self.num_vertices:
@@ -327,7 +326,8 @@ class C_SRS_fixedEnd:
                     print(f"Converged at time {t_a:.2f} with diff {diff:.6f} for 10 consecutive steps, stopping simulation.")
                     break
             t3 = time.time()
-            # print(f"t_a: {t_a:.3f}, diff: {diff:.7f}, time for R_list: {t1-t0:.4f}s, time for K_mat: {t2-t1:.4f}s, total time for this step: {t3-t0:.4f}s")
+            if show_info:
+                print(f"t_a: {t_a:.3f}, diff: {diff:.7f}, time for R_list: {t1-t0:.4f}s, time for K_mat: {t2-t1:.4f}s, total time for this step: {t3-t0:.4f}s")
         t_end = time.time()
         print(f"Total simulation time: {t_end - t_start:.2f}s")
         vert_length = self.q_to_vertices(Q_a)
@@ -1078,10 +1078,13 @@ if __name__ == "__main__":
     # c_srs.generate_ws(cl_range_1, total_number=1000, saveFile='training_data_1.pkl')
     # c_srs.generate_ws(cl_range_2, total_number=1000, saveFile='training_data_2.pkl')
     # exit(0)
-    tcl = [icl[0]-0.01, icl[1]-0.01, icl[2]-0.01, icl[3], icl[4], icl[5]]
-    Q_list, vert_length, cable_tension = c_srs.FKD_time(tcl, 1, c_srs.vertices, tol = 1e-4)
+    tcl = [icl[0]-0.02, icl[1]-0.02, icl[2]-0.02, icl[3], icl[4], icl[5]]
+    Q_list, vert_length, cable_tension = c_srs.FKD_time(tcl, 1, c_srs.vertices, tol = 1e-7, show_info = True)
+    fcl = c_srs.get_cable_length(vert_length)
+    vert_cg = c_srs.deform_CG(fcl, c_srs.vertices)
     print("cable tension: ", cable_tension)
     c_srs.visualize_vert(vert_length)
+    c_srs.visualize_vert(vert_cg)
     exit(0)
     # cur_length, starting_vertices = c_srs.IKD_single(ee_target,  c_srs.vertices, AA = False, tol = 1e-3)
     # cur_length, starting_vertices = c_srs.IK_CG(ee_target, c_srs.vertices, tol = 1e-3)

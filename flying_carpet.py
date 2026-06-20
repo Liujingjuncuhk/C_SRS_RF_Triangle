@@ -283,6 +283,14 @@ class Flying_carpet:
             diff = 1/2*np.linalg.norm(ee_poses - target_EE_pos)**2
             return diff
         
+        def get_diff_cartesian(Q):
+            ee_poses = self.get_ee_poses(Q)
+            diff = 0 
+            for i in range(len(self.ee_idx)):
+                diff += np.linalg.norm(ee_poses[i] - target_EE_pos[i])
+            diff = diff / len(self.ee_idx)
+            return diff
+
         def get_jacobian(Q):
             ee_poses = self.get_ee_poses(Q)
             Jac_CG = self.get_CG_Jacobian(Q)
@@ -308,7 +316,7 @@ class Flying_carpet:
             # alpha = 10
             # dl = alpha*diff/(np.max(np.abs(jac))+1e-6)
             for k in range(self.nCable):
-                if cable_tension[k] < 1e-5 and jac[k] < 0:
+                if cable_tension[k] < 1e-5 and jac[k]   < 0:
                     cmd_diff[k] = 0
                 else:
                     cmd_diff[k] = -dl * jac[k]
@@ -321,8 +329,7 @@ class Flying_carpet:
             # input("Press Enter to continue...")
             Q = self.vertices_to_q(starting_vertices)
             final_Q_list.append(Q.copy())
-            diff = get_diff(Q)
-            diff = np.sqrt(2*diff)/self.nCable/3
+            diff = get_diff_cartesian(Q)
             print("Iteration {}: diff = {}, dl = {}, Jacobian: {}, cable_force: {}".format(i, diff, dl,  np.round(jac, 5), np.round(cable_tension, 5)))
             if diff < tol:
                 print("Converged at iteration {} with diff {}".format(i, diff))
@@ -554,8 +561,11 @@ if __name__ == "__main__":
     # exit(0)
     # flying_carpet.visualize_vert(flying_carpet.vertices)
     icl = flying_carpet.initial_cable_length
-    shortened_length = 0.04
+    shortened_length = 0.05
     tcl = [icl[0]-shortened_length, icl[1]-shortened_length, icl[2]-shortened_length, icl[3]-shortened_length, icl[4], icl[5], icl[6], icl[7]]
-    Q_list, vert_length, cable_tension = flying_carpet.FKD_time(tcl, 1, flying_carpet.vertices, tol = 1e-4)
+    Q_list, vert_length, cable_tension = flying_carpet.FKD_time(tcl, 1, flying_carpet.vertices, tol = 1e-5)
     # vert_length = flying_carpet.deform_CG(tcl, flying_carpet.vertices, max_iter=1000, tol=1e-9)
+    fcl = flying_carpet.get_cable_length(vert_length)
+    vert_cg = flying_carpet.deform_CG(fcl, flying_carpet.vertices, max_iter=1000, tol=1e-9)
     flying_carpet.visualize_vert(vert_length)
+    flying_carpet.visualize_vert(vert_cg)
