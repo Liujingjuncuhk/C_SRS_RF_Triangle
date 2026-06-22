@@ -19,12 +19,12 @@ import pickle
 if __name__ == "__main__":
     description_file = "./models/flying_carpet/flying_carpet_description.pkl"
     flying_carpet = Flying_carpet(description_file)
-    filename = "./data_flying_carpet/80mm_centered.pkl"
+    filename = "./data_flying_carpet/40mm_centered.pkl"
     with open(filename, 'rb') as f:
         ee_pos_centered = pickle.load(f)
     offset = np.array([0.28, 0.4, 0.2])
     ee_target_pos = ee_pos_centered + offset
-    final_length, final_vert, Q_list = flying_carpet.IKD_single(ee_target_pos, flying_carpet.vertices, max_iter=30, tol=1e-3)
+    final_length, final_vert, Q_list = flying_carpet.IKD_single(ee_target_pos, flying_carpet.vertices, max_iter=30, tol=5e-3)
 
     flying_carpet.replay_IKD_Q_list(ee_target_pos, Q_list)
     flying_carpet.visualize_IKD_result(ee_target_pos, final_vert)

@@ -3,25 +3,190 @@ import matplotlib.pyplot as plt
 from collections import defaultdict
 import pickle
 import pyvista as pv
+import triangle as tr
+import ezdxf
 
+
+DXF_PATH = "./models/flying_carpet/flying_carpet_tri.dxf"
+MAX_AREA = 50   # max triangle area in DXF units²; lower = finer mesh
 thickness = 0.003 # meter
 Youngs_modulus = 4.2e6 # Pa
 Poisson_ratio = 0.3
 density = 961 # kg/m^3
 
 folder = "./models/flying_carpet/"
-mesh_vertices = np.load(folder + "mesh_vertices.npy") * 1e-3
-mesh_triangles = np.load(folder + "mesh_triangles.npy")
-mesh_RF_triangles = np.load(folder + "mesh_RF_triangles.npy")
-# for i in range(mesh_RF_triangles.shape[0]):
-#     for j in range(mesh_RF_triangles.shape[1]):
-#         if mesh_RF_triangles[i,j] < 0:
-#             print(f"Error: mesh_RF_triangles[{i},{j}] is negative, the value is {mesh_RF_triangles[i,j]}")
-# exit(0)
-print("mesh_vertices shape:", mesh_vertices.shape)
-# extend 0 on the z-axis for 2D mesh
-mesh_vertices = np.hstack((mesh_vertices, np.zeros((mesh_vertices.shape[0], 1))))
-print("mesh_vertices shape:", mesh_vertices.shape)
+
+pullpoint_locations = np.array([[-61, 96, 0], [-61, -96, 0], [61, 96, 0], [61, -96, 0], [-61, 26, 0],[-61, -26, 0], [61, 26, 0] ,[61, -26, 0]]) * 1e-3
+pulley_locations = np.array([[116,36,46], [116, 724, 46], [444, 36,46], [444,724, 46], [116,36,516], [116, 724, 516], [464,36,516], [464,724,516]]) * 1e-3
+# ee_vertices_list = np.array([[270, 80, 0]]) * 1e-3
+def mesh_polygon(boundary, pp_locations=None, max_area=None, min_angle=30):
+    """
+    Constrained Delaunay triangulation of the interior.
+    pp_locations: (M, 2) or (M, 3) array of interior points that must appear
+                  as mesh vertices (e.g. pull-point locations). The triangulator
+                  guarantees they are included, so no post-hoc triangle splitting
+                  is needed. Pass coordinates in the same unit as boundary.
+    max_area: target max triangle area (None = no refinement).
+    min_angle: minimum angle quality constraint.
+    """
+    n = len(boundary)
+    segs = np.array([[i, (i + 1) % n] for i in range(n)])
+
+    if pp_locations is not None and len(pp_locations) > 0:
+        pp_xy = np.asarray(pp_locations, dtype=float)[:, :2]
+        all_verts = np.vstack([boundary, pp_xy])
+    else:
+        all_verts = boundary
+
+    A = {"vertices": all_verts, "segments": segs}
+
+    opts = "p"
+    opts += f"q{min_angle}"
+    if max_area is not None:
+        opts += f"a{max_area}"
+    B = tr.triangulate(A, opts)
+    return np.array(B["vertices"], dtype=float), np.array(B["triangles"], dtype=int)
+
+# ----------------------------------------------------------------------
+# 1. Extract the closed boundary polyline from the DXF
+# ----------------------------------------------------------------------
+def extract_boundary(dxf_path, arc_seg=32, close_tol=1e-6):
+    """
+    Returns an ordered (N, 2) array of boundary vertices.
+    Handles LWPOLYLINE, POLYLINE, LINE, ARC, CIRCLE, SPLINE.
+    Picks the single longest closed loop found.
+    """
+    doc = ezdxf.readfile(dxf_path)
+    msp = doc.modelspace()
+
+    segments = []  # list of (P0, P1) edges as 2-tuples of np.array
+
+    def add_pts(pts):
+        pts = [np.asarray(p[:2], float) for p in pts]
+        for a, b in zip(pts[:-1], pts[1:]):
+            segments.append((a, b))
+
+    for e in msp:
+        t = e.dxftype()
+        if t == "LWPOLYLINE":
+            pts = [(p[0], p[1]) for p in e.get_points("xy")]
+            if e.closed and len(pts) > 1:
+                pts.append(pts[0])
+            add_pts(pts)
+        elif t == "POLYLINE":
+            pts = [(v.dxf.location.x, v.dxf.location.y) for v in e.vertices]
+            if e.is_closed and len(pts) > 1:
+                pts.append(pts[0])
+            add_pts(pts)
+        elif t == "LINE":
+            add_pts([(e.dxf.start.x, e.dxf.start.y),
+                     (e.dxf.end.x, e.dxf.end.y)])
+        elif t == "ARC":
+            a0, a1 = np.radians(e.dxf.start_angle), np.radians(e.dxf.end_angle)
+            if a1 <= a0:
+                a1 += 2 * np.pi
+            ang = np.linspace(a0, a1, arc_seg)
+            c, r = e.dxf.center, e.dxf.radius
+            add_pts([(c.x + r*np.cos(t_), c.y + r*np.sin(t_)) for t_ in ang])
+        elif t == "CIRCLE":
+            ang = np.linspace(0, 2*np.pi, arc_seg + 1)
+            c, r = e.dxf.center, e.dxf.radius
+            add_pts([(c.x + r*np.cos(t_), c.y + r*np.sin(t_)) for t_ in ang])
+        elif t == "SPLINE":
+            pts = [(p[0], p[1]) for p in e.flattening(distance=0.01)]
+            add_pts(pts)
+
+    if not segments:
+        raise ValueError("No usable boundary entities found in DXF.")
+
+    # ---- stitch edges into an ordered loop ----
+    def key(p):
+        return (round(p[0] / close_tol), round(p[1] / close_tol))
+
+    from collections import defaultdict
+    adj = defaultdict(list)
+    for i, (a, b) in enumerate(segments):
+        adj[key(a)].append((key(b), b, a))
+        adj[key(b)].append((key(a), a, b))
+
+    used = set()
+    loops = []
+    for start in list(adj.keys()):
+        if start in used:
+            continue
+        loop = []
+        cur = start
+        prev = None
+        while True:
+            used.add(cur)
+            nbrs = [n for n in adj[cur] if n[0] != prev]
+            if not nbrs:
+                break
+            nxt_key, nxt_pt, cur_pt = nbrs[0]
+            loop.append(cur_pt)
+            prev, cur = cur, nxt_key
+            if cur == start:
+                loop.append(nxt_pt)
+                break
+            if cur in used:
+                break
+        if len(loop) >= 3:
+            loops.append(np.array(loop))
+
+    # longest loop = outer boundary
+    boundary = max(loops, key=lambda L: len(L))
+
+    # drop duplicate closing point
+    if np.allclose(boundary[0], boundary[-1]):
+        boundary = boundary[:-1]
+    return boundary
+
+def build_RF_matrix(triangles):
+    """
+    Returns RF_triangle_matrix of shape (N_tri, 6).
+
+    Columns 0-2 : node indices of the triangle  [n0, n1, n2]
+    Column  3   : global node index opposite to edge 12 (n0-n1) in the neighbour triangle
+    Column  4   : global node index opposite to edge 23 (n1-n2) in the neighbour triangle
+    Column  5   : global node index opposite to edge 31 (n2-n0) in the neighbour triangle
+
+    Boundary edges (no neighbour) are filled with -1.
+    """
+    # local edge definitions: (local_i, local_j) -> opposite local index = 3-i-j
+    local_edges = [(0, 1), (1, 2), (2, 0)]
+
+    # map frozenset({a,b}) -> list of (tri_idx, opposite_global_node)
+    edge_map = {}
+    for ti, tri in enumerate(triangles):
+        for i, j in local_edges:
+            a, b = int(tri[i]), int(tri[j])
+            opp = int(tri[3 - i - j])
+            key = frozenset((a, b))
+            if key not in edge_map:
+                edge_map[key] = []
+            edge_map[key].append((ti, opp))
+
+    rf = np.full((len(triangles), 6), -1, dtype=np.int32)
+    rf[:, :3] = triangles
+
+    for ti, tri in enumerate(triangles):
+        for col, (i, j) in enumerate(local_edges):
+            key = frozenset((int(tri[i]), int(tri[j])))
+            for nti, nopp in edge_map[key]:
+                if nti != ti:
+                    rf[ti, 3 + col] = nopp
+                    break
+
+    return rf
+
+
+
+boundary = extract_boundary(DXF_PATH)
+
+mesh_vertices, mesh_triangles = mesh_polygon(boundary, pp_locations=pullpoint_locations[:, :2] * 1e3, max_area=MAX_AREA, min_angle=30)
+mesh_RF_triangles = build_RF_matrix(mesh_triangles)
+mesh_vertices = mesh_vertices * 1e-3  # mm → m
+mesh_vertices = np.hstack((mesh_vertices, np.zeros((mesh_vertices.shape[0], 1))))  # add z=0
 
 
 
@@ -412,48 +577,35 @@ def build_bending_elements(mesh_vertices, mesh_triangles, k_bend=1.0):
             np.array(c_val_matrix, dtype=float),
             np.array(weight_list, dtype=float))
 
+def generate_L_list(mesh_vertices, mesh_triangles):
+    L_list = []
+    for tri in mesh_triangles:
+        v0, v1, v2 = mesh_vertices[tri]
+        L0 = np.linalg.norm(v1 - v0) ** 2
+        L1 = np.linalg.norm(v2 - v1) ** 2
+        L2 = np.linalg.norm(v0 - v2) ** 2
+        L_list.append(np.sqrt((L0 + L1 + L2) / 3))
+    return L_list
 
 def generate_C_SRS_description(mesh_vertices, mesh_triangles, pullpoint_locations, pulley_locations, density, thickness, Youngs_modulus, Poisson_ratio):
     k_m = Youngs_modulus * thickness / (1-Poisson_ratio**2)
     k_b = Youngs_modulus * thickness**3 / (12 * (1-Poisson_ratio**2))
+    print("k_m: ", k_m)
+    print("k_b: ", k_b)
     def K(Vx, ev2, c2):
         return np.array([c2[e,0]*Vx[ev2[e,0]]+c2[e,1]*Vx[ev2[e,1]]+
                         c2[e,2]*Vx[ev2[e,2]]+c2[e,3]*Vx[ev2[e,3]]
                         for e in range(len(ev2))])
 
-    # Add a new vertex at each pullpoint by splitting the containing triangle into 3
+    # Vertices at pullpoint locations are already guaranteed by mesh_polygon;
+    # find the closest existing vertex for each pullpoint.
     pp_idx = []
-    mesh_triangles_list = mesh_triangles.tolist()
     for i in range(len(pullpoint_locations)):
-        new_vert = pullpoint_locations[i].copy()
-        ti = find_containing_triangle(mesh_vertices, np.array(mesh_triangles_list, dtype=int), new_vert)
-        if ti == -1:
-            dists = np.linalg.norm(mesh_vertices[interior_indices] - new_vert, axis=1)
-            idx = interior_indices[np.argmin(dists)]
-            pp_idx.append(idx)
-            print(f"Warning: pullpoint {i} not inside any triangle, falling back to closest interior vertex {idx}")
-            continue
-        new_idx = len(mesh_vertices)
-        mesh_vertices = np.vstack([mesh_vertices, new_vert.reshape(1, 3)])
-        v0, v1, v2 = mesh_triangles_list[ti][0], mesh_triangles_list[ti][1], mesh_triangles_list[ti][2]
-        mesh_triangles_list[ti] = [v0, v1, new_idx]
-        mesh_triangles_list.append([v1, v2, new_idx])
-        mesh_triangles_list.append([v2, v0, new_idx])
-        pp_idx.append(new_idx)
-    mesh_triangles = np.array(mesh_triangles_list, dtype=int)
+        dists = np.linalg.norm(mesh_vertices[:, :2] - pullpoint_locations[i, :2], axis=1)
+        idx = int(np.argmin(dists))
+        pp_idx.append(idx)
+        print(f"Pullpoint {i}: vertex {idx}, distance {dists[idx]:.6e}")
     mesh_RF_triangles_updated = build_RF_matrix(mesh_triangles)
-
-    # identify boundary vertices (edges shared by only one triangle)
-    edge_count = defaultdict(int)
-    for tri in mesh_triangles:
-        for i in range(3):
-            edge = tuple(sorted((tri[i], tri[(i + 1) % 3])))
-            edge_count[edge] += 1
-    boundary_vertex_set = set()
-    for edge, count in edge_count.items():
-        if count == 1:
-            boundary_vertex_set.update(edge)
-    interior_indices = np.array([i for i in range(len(mesh_vertices)) if i not in boundary_vertex_set])
 
     ee_idx = pp_idx.copy() # for this example, we can just set the ee vertices to be the same as pullpoint vertices, since we don't have a specific end-effector shape in mind. In practice, you can specify different ee vertices based on your requirements.
 
@@ -461,11 +613,17 @@ def generate_C_SRS_description(mesh_vertices, mesh_triangles, pullpoint_location
 
     edge_list, weight_list = generate_edge_matrix(mesh_vertices, mesh_triangles)
     bending_ele_idx, bending_ele_param, bending_weight_list = build_bending_elements(mesh_vertices, mesh_triangles)
+    print("max bending weight before scaling: ", np.max(bending_weight_list))
+    print("ave bending weight before scaling: ", np.mean(bending_weight_list))
     bending_weight_list = [k_b * w for w in bending_weight_list]    
 
     neighbour_list, neighbour_edge_list = generate_neighbour_list(mesh_triangles, len(mesh_vertices), edge_list)
     area_list = cal_area_list(mesh_vertices, mesh_triangles)
-    mem_weight_list = [k_m * area for area in area_list]
+
+    L_list = generate_L_list(mesh_vertices, mesh_triangles)
+    mem_weight_list = [0 for _ in range(len(mesh_triangles))]
+    for i in range(len(mesh_triangles)):
+        mem_weight_list[i] = k_m * area_list[i] / (L_list[i]**2)
     initial_SK_list = get_ARAP_initial_SK_list(mesh_vertices, mesh_triangles, edge_list, weight_list, neighbour_list, neighbour_edge_list)
     stiffness_matrices = []
     for tri in mesh_RF_triangles_updated:
@@ -506,8 +664,6 @@ def generate_C_SRS_description(mesh_vertices, mesh_triangles, pullpoint_location
 # boundary_vertices = get_boundary_vertex_indices(mesh_triangles)
 # print("boundary_vertices:", boundary_vertices)
 
-pullpoint_locations = np.array([[-61, 96, 0], [-61, -96, 0], [61, 96, 0], [61, -96, 0], [-61, 26, 0],[-61, -26, 0], [61, 26, 0] ,[61, -26, 0]]) * 1e-3
-pulley_locations = np.array([[116,36,46], [116, 724, 46], [444, 36,46], [444,724, 46], [116,36,516], [116, 724, 516], [464,36,516], [464,724,516]]) * 1e-3
-# ee_vertices_list = np.array([[270, 80, 0]]) * 1e-3
+
 
 generate_C_SRS_description(mesh_vertices, mesh_triangles, pullpoint_locations=pullpoint_locations, pulley_locations=pulley_locations,density=density, thickness=thickness, Youngs_modulus=Youngs_modulus, Poisson_ratio=Poisson_ratio)

@@ -226,7 +226,39 @@ def _merge_close_vertices(verts, tris, tol=1e-6):
 
 
 # ----------------------------------------------------------------------
-# 3. Triangulate with x-y symmetry
+# 3. Triangulate the polygon (no symmetry enforced)
+# ----------------------------------------------------------------------
+def mesh_polygon(boundary, pp_locations=None, max_area=None, min_angle=30):
+    """
+    Constrained Delaunay triangulation of the interior.
+    pp_locations: (M, 2) or (M, 3) array of interior points that must appear
+                  as mesh vertices (e.g. pull-point locations). The triangulator
+                  guarantees they are included, so no post-hoc triangle splitting
+                  is needed. Pass coordinates in the same unit as boundary.
+    max_area: target max triangle area (None = no refinement).
+    min_angle: minimum angle quality constraint.
+    """
+    n = len(boundary)
+    segs = np.array([[i, (i + 1) % n] for i in range(n)])
+
+    if pp_locations is not None and len(pp_locations) > 0:
+        pp_xy = np.asarray(pp_locations, dtype=float)[:, :2]
+        all_verts = np.vstack([boundary, pp_xy])
+    else:
+        all_verts = boundary
+
+    A = {"vertices": all_verts, "segments": segs}
+
+    opts = "p"
+    opts += f"q{min_angle}"
+    if max_area is not None:
+        opts += f"a{max_area}"
+    B = tr.triangulate(A, opts)
+    return np.array(B["vertices"], dtype=float), np.array(B["triangles"], dtype=int)
+
+
+# ----------------------------------------------------------------------
+# 4. Triangulate with x-y symmetry
 # ----------------------------------------------------------------------
 def mesh_polygon_symmetric(boundary, max_area=None, min_angle=30):
     """
@@ -298,7 +330,7 @@ def mesh_polygon_symmetric(boundary, max_area=None, min_angle=30):
 
 
 # ----------------------------------------------------------------------
-# 4. Build rotation-free triangle matrix
+# 5. Build rotation-free triangle matrix
 # ----------------------------------------------------------------------
 def build_RF_matrix(triangles):
     """
@@ -340,7 +372,7 @@ def build_RF_matrix(triangles):
 
 
 # ----------------------------------------------------------------------
-# 5. Run
+# 6. Run
 # ----------------------------------------------------------------------
 if __name__ == "__main__":
     DXF_PATH = "./models/flying_carpet/flying_carpet_tri.dxf"
@@ -348,7 +380,8 @@ if __name__ == "__main__":
     MAX_AREA = 50   # max triangle area in DXF units²; lower = finer mesh
 
     boundary = extract_boundary(DXF_PATH)
-    V, T = mesh_polygon_symmetric(boundary, max_area=MAX_AREA, min_angle=30)
+    # V, T = mesh_polygon_symmetric(boundary, max_area=MAX_AREA, min_angle=30)
+    V, T = mesh_polygon(boundary, max_area=MAX_AREA, min_angle=30)
     RF = build_RF_matrix(T)
 
     print(f"Boundary points: {len(boundary)}")

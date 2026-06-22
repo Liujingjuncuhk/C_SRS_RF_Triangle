@@ -3,25 +3,135 @@ import matplotlib.pyplot as plt
 from collections import defaultdict
 import pickle
 import pyvista as pv
+import triangle as tr
+import ezdxf
 
+DXF_PATH = "./models/flat_tri_surface/flat_tri_surface.DXF"
+MAX_AREA = 100   # max triangle area in DXF units² (mm²); lower = finer mesh
 thickness = 0.005 # meter
 Youngs_modulus = 4.2e6 # Pa
 Poisson_ratio = 0.3
 density = 961 # kg/m^3
 
 folder = "./models/flat_tri_surface/"
-mesh_vertices = np.load(folder + "mesh_vertices.npy") * 1e-3
-mesh_triangles = np.load(folder + "mesh_triangles.npy")
-mesh_RF_triangles = np.load(folder + "mesh_RF_triangles.npy")
-# for i in range(mesh_RF_triangles.shape[0]):
-#     for j in range(mesh_RF_triangles.shape[1]):
-#         if mesh_RF_triangles[i,j] < 0:
-#             print(f"Error: mesh_RF_triangles[{i},{j}] is negative, the value is {mesh_RF_triangles[i,j]}")
-# exit(0)
-print("mesh_vertices shape:", mesh_vertices.shape)
-# extend 0 on the z-axis for 2D mesh
-mesh_vertices = np.hstack((mesh_vertices, np.zeros((mesh_vertices.shape[0], 1))))
-print("mesh_vertices shape:", mesh_vertices.shape)
+
+pullpoint_locations = np.array([[215, 10, 0], [250,80,0], [215, 150, 0], [180, 10, 0], [145, 80, 0], [180, 150,0]]) * 1e-3
+pulley_locations = np.array([[30, 10, 400], [30, 80, 400], [30, 150, 400], [10, 10, -259], [10, 80, -259], [10, 150, -259]]) * 1e-3
+ee_vertices_list = np.array([[270, 80, 0]]) * 1e-3
+
+
+def extract_boundary(dxf_path, arc_seg=32, close_tol=1e-6):
+    """
+    Returns an ordered (N, 2) array of boundary vertices.
+    Handles LWPOLYLINE, POLYLINE, LINE, ARC, CIRCLE, SPLINE.
+    Picks the single longest closed loop found.
+    """
+    doc = ezdxf.readfile(dxf_path)
+    msp = doc.modelspace()
+
+    segments = []
+
+    def add_pts(pts):
+        pts = [np.asarray(p[:2], float) for p in pts]
+        for a, b in zip(pts[:-1], pts[1:]):
+            segments.append((a, b))
+
+    for e in msp:
+        t = e.dxftype()
+        if t == "LWPOLYLINE":
+            pts = [(p[0], p[1]) for p in e.get_points("xy")]
+            if e.closed and len(pts) > 1:
+                pts.append(pts[0])
+            add_pts(pts)
+        elif t == "POLYLINE":
+            pts = [(v.dxf.location.x, v.dxf.location.y) for v in e.vertices]
+            if e.is_closed and len(pts) > 1:
+                pts.append(pts[0])
+            add_pts(pts)
+        elif t == "LINE":
+            add_pts([(e.dxf.start.x, e.dxf.start.y),
+                     (e.dxf.end.x, e.dxf.end.y)])
+        elif t == "ARC":
+            a0, a1 = np.radians(e.dxf.start_angle), np.radians(e.dxf.end_angle)
+            if a1 <= a0:
+                a1 += 2 * np.pi
+            ang = np.linspace(a0, a1, arc_seg)
+            c, r = e.dxf.center, e.dxf.radius
+            add_pts([(c.x + r*np.cos(t_), c.y + r*np.sin(t_)) for t_ in ang])
+        elif t == "CIRCLE":
+            ang = np.linspace(0, 2*np.pi, arc_seg + 1)
+            c, r = e.dxf.center, e.dxf.radius
+            add_pts([(c.x + r*np.cos(t_), c.y + r*np.sin(t_)) for t_ in ang])
+        elif t == "SPLINE":
+            pts = [(p[0], p[1]) for p in e.flattening(distance=0.01)]
+            add_pts(pts)
+
+    if not segments:
+        raise ValueError("No usable boundary entities found in DXF.")
+
+    def key(p):
+        return (round(p[0] / close_tol), round(p[1] / close_tol))
+
+    adj = defaultdict(list)
+    for i, (a, b) in enumerate(segments):
+        adj[key(a)].append((key(b), b, a))
+        adj[key(b)].append((key(a), a, b))
+
+    used = set()
+    loops = []
+    for start in list(adj.keys()):
+        if start in used:
+            continue
+        loop = []
+        cur = start
+        prev = None
+        while True:
+            used.add(cur)
+            nbrs = [n for n in adj[cur] if n[0] != prev]
+            if not nbrs:
+                break
+            nxt_key, nxt_pt, cur_pt = nbrs[0]
+            loop.append(cur_pt)
+            prev, cur = cur, nxt_key
+            if cur == start:
+                loop.append(nxt_pt)
+                break
+            if cur in used:
+                break
+        if len(loop) >= 3:
+            loops.append(np.array(loop))
+
+    boundary = max(loops, key=lambda L: len(L))
+    if np.allclose(boundary[0], boundary[-1]):
+        boundary = boundary[:-1]
+    return boundary
+
+
+def mesh_polygon(boundary, pp_locations=None, max_area=None, min_angle=30):
+    """
+    Constrained Delaunay triangulation of the interior.
+    pp_locations: (M, 2) or (M, 3) array of interior points that must appear
+                  as mesh vertices (e.g. pull-point locations). The triangulator
+                  guarantees they are included, so no post-hoc triangle splitting
+                  is needed. Pass coordinates in the same unit as boundary.
+    """
+    n = len(boundary)
+    segs = np.array([[i, (i + 1) % n] for i in range(n)])
+
+    if pp_locations is not None and len(pp_locations) > 0:
+        pp_xy = np.asarray(pp_locations, dtype=float)[:, :2]
+        all_verts = np.vstack([boundary, pp_xy])
+    else:
+        all_verts = boundary
+
+    A = {"vertices": all_verts, "segments": segs}
+
+    opts = "p"
+    opts += f"q{min_angle}"
+    if max_area is not None:
+        opts += f"a{max_area}"
+    B = tr.triangulate(A, opts)
+    return np.array(B["vertices"], dtype=float), np.array(B["triangles"], dtype=int)
 
 
 def _cot(u, v):
@@ -35,7 +145,7 @@ def build_bending_elements(mesh_vertices, mesh_triangles, k_bend=1.0):
     """
     Linear bending-curvature stencil + ShapeUp/Projective-Dynamics weight for every
     interior (non-boundary) edge of a flat-rest triangle mesh.
- 
+
     Stencil: gradient of the dihedral angle at the flat configuration
     (Bridson et al. 2003; Wardetzky et al. 2007). For each interior edge:
         v1, v2  = shared edge endpoints
@@ -44,20 +154,20 @@ def build_bending_elements(mesh_vertices, mesh_triangles, k_bend=1.0):
     The hinge bending curvature is linear in the four node positions:
         K = c0*x_v1 + c1*x_v2 + c2*x_v3 + c3*x_v4
     Each c-row sums to zero (translation invariance); K = 0 at the flat rest state.
- 
+
     Weight: quadratic-bending stiffness of Bergou et al. 2006, as used by the
     ShapeUp / Projective Dynamics bending constraint (Bouaziz et al. 2012, 2014 §5.4):
         w_e = k_bend * 3 * ||e||^2 / Abar_e
     where ||e|| is the shared-edge rest length and Abar_e = (A_A + A_B)/3 is the
     combined (one-third) area of the two incident triangles. The bending energy of
     the hinge is  0.5 * w_e * ||K||^2, contributing w_e * c c^T to the global matrix.
- 
+
     Parameters
     ----------
     mesh_vertices  : (N, 3) array of initial (rest) vertex positions
     mesh_triangles : (M, 3) int array of triangle vertex indices
     k_bend         : float, scalar bending stiffness (material/thickness factor)
- 
+
     Returns
     -------
     edge_vertices : (n_inner, 4) int array    rows [v1, v2, v3, v4]
@@ -66,63 +176,63 @@ def build_bending_elements(mesh_vertices, mesh_triangles, k_bend=1.0):
     """
     V = np.asarray(mesh_vertices, dtype=float)
     F = np.asarray(mesh_triangles, dtype=np.int64)
- 
+
     edge_map = {}
     for tri in F:
         i, j, k = int(tri[0]), int(tri[1]), int(tri[2])
         for a, b, apex in ((i, j, k), (j, k, i), (k, i, j)):
             key = (a, b) if a < b else (b, a)
             edge_map.setdefault(key, []).append(apex)
- 
+
     edge_vertices = []
     c_val_matrix = []
     weight_list = []
- 
+
     for (v1, v2), apexes in edge_map.items():
         if len(apexes) != 2:
             continue  # boundary (1 triangle) or non-manifold (>2): no bending
         v3, v4 = apexes
         p1, p2, p3, p4 = V[v1], V[v2], V[v3], V[v4]
- 
+
         e = p2 - p1
         Le = np.linalg.norm(e)
         if Le < 1e-14:
             continue
- 
+
         # apex heights to the shared-edge line
         ee = np.dot(e, e)
         proj3 = p1 + (np.dot(p3 - p1, e) / ee) * e
         proj4 = p1 + (np.dot(p4 - p1, e) / ee) * e
         hA = np.linalg.norm(p3 - proj3)
         hB = np.linalg.norm(p4 - proj4)
- 
+
         # cotangents of the angles at the edge endpoints, per triangle
         a1 = _cot(p3 - p1, p2 - p1)   # angle at v1 in A
         a2 = _cot(p3 - p2, p1 - p2)   # angle at v2 in A
         b1 = _cot(p4 - p1, p2 - p1)   # angle at v1 in B
         b2 = _cot(p4 - p2, p1 - p2)   # angle at v2 in B
- 
+
         # barycentric split of each apex's contribution onto the two endpoints
         wA1 = a2 / (a1 + a2)
         wA2 = a1 / (a1 + a2)
         wB1 = b2 / (b1 + b2)
         wB2 = b1 / (b1 + b2)
- 
+
         c3 = Le / hA
         c4 = Le / hB
         c1 = -(Le / hA) * wA1 - (Le / hB) * wB1
         c2 = -(Le / hA) * wA2 - (Le / hB) * wB2
- 
+
         # combined hinge area Abar = (A_A + A_B)/3  and Bergou bending weight
         AA = 0.5 * Le * hA
         AB = 0.5 * Le * hB
         Abar = (AA + AB) / 3.0
         w_e = k_bend * 3.0 * Le * Le / Abar
- 
+
         edge_vertices.append([v1, v2, v3, v4])
         c_val_matrix.append([c1, c2, c3, c4])
         weight_list.append(w_e)
- 
+
     return (np.array(edge_vertices, dtype=np.int64),
             np.array(c_val_matrix, dtype=float),
             np.array(weight_list, dtype=float))
@@ -391,22 +501,15 @@ def build_RF_matrix(triangles):
                     break
     return rf
 
-
-def find_containing_triangle(mesh_vertices, mesh_triangles, point):
-    px, py = point[0], point[1]
-    for ti, tri in enumerate(mesh_triangles):
-        ax, ay = mesh_vertices[tri[0], 0], mesh_vertices[tri[0], 1]
-        bx, by = mesh_vertices[tri[1], 0], mesh_vertices[tri[1], 1]
-        cx, cy = mesh_vertices[tri[2], 0], mesh_vertices[tri[2], 1]
-        d1 = (px - bx) * (ay - by) - (ax - bx) * (py - by)
-        d2 = (px - cx) * (by - cy) - (bx - cx) * (py - cy)
-        d3 = (px - ax) * (cy - ay) - (cx - ax) * (py - ay)
-        has_neg = (d1 < 0) or (d2 < 0) or (d3 < 0)
-        has_pos = (d1 > 0) or (d2 > 0) or (d3 > 0)
-        if not (has_neg and has_pos):
-            return ti
-    return -1
-
+def generate_L_list(mesh_vertices, mesh_triangles):
+    L_list = []
+    for tri in mesh_triangles:
+        v0, v1, v2 = mesh_vertices[tri]
+        L0 = np.linalg.norm(v1 - v0) ** 2
+        L1 = np.linalg.norm(v2 - v1) ** 2
+        L2 = np.linalg.norm(v0 - v2) ** 2
+        L_list.append(np.sqrt((L0 + L1 + L2) / 3))
+    return L_list
 
 def generate_C_SRS_description(mesh_vertices, mesh_triangles, pullpoint_locations, pulley_locations, ee_vertices_list, density, thickness, Youngs_modulus, Poisson_ratio):
     k_m = Youngs_modulus * thickness / (1-Poisson_ratio**2)
@@ -415,67 +518,35 @@ def generate_C_SRS_description(mesh_vertices, mesh_triangles, pullpoint_location
         return np.array([c2[e,0]*Vx[ev2[e,0]]+c2[e,1]*Vx[ev2[e,1]]+
                         c2[e,2]*Vx[ev2[e,2]]+c2[e,3]*Vx[ev2[e,3]]
                         for e in range(len(ev2))])
-    # Add a new vertex at each pullpoint by splitting the containing triangle into 3
-    pp_idx = []
-    mesh_triangles_list = mesh_triangles.tolist()
-    for i in range(len(pullpoint_locations)):
-        new_vert = pullpoint_locations[i].copy()
-        ti = find_containing_triangle(mesh_vertices, np.array(mesh_triangles_list, dtype=int), new_vert)
-        if ti == -1:
-            # fallback: compute interior vertices on the fly and snap the closest one
-            edge_count_tmp = defaultdict(int)
-            for tri in mesh_triangles_list:
-                for k in range(3):
-                    edge = tuple(sorted((tri[k], tri[(k + 1) % 3])))
-                    edge_count_tmp[edge] += 1
-            boundary_tmp = set()
-            for edge, count in edge_count_tmp.items():
-                if count == 1:
-                    boundary_tmp.update(edge)
-            interior_tmp = np.array([j for j in range(len(mesh_vertices)) if j not in boundary_tmp])
-            dists = np.linalg.norm(mesh_vertices[interior_tmp] - new_vert, axis=1)
-            idx = interior_tmp[np.argmin(dists)]
-            mesh_vertices[idx] = new_vert
-            pp_idx.append(idx)
-            print(f"Warning: pullpoint {i} not inside any triangle, falling back to closest interior vertex {idx}")
-            continue
-        new_idx = len(mesh_vertices)
-        mesh_vertices = np.vstack([mesh_vertices, new_vert.reshape(1, 3)])
-        v0, v1, v2 = mesh_triangles_list[ti][0], mesh_triangles_list[ti][1], mesh_triangles_list[ti][2]
-        mesh_triangles_list[ti] = [v0, v1, new_idx]
-        mesh_triangles_list.append([v1, v2, new_idx])
-        mesh_triangles_list.append([v2, v0, new_idx])
-        pp_idx.append(new_idx)
-    mesh_triangles = np.array(mesh_triangles_list, dtype=int)
-    mesh_RF_triangles_updated = build_RF_matrix(mesh_triangles)
 
-    # identify boundary vertices after remeshing
-    edge_count = defaultdict(int)
-    for tri in mesh_triangles:
-        for i in range(3):
-            edge = tuple(sorted((tri[i], tri[(i + 1) % 3])))
-            edge_count[edge] += 1
-    boundary_vertex_set = set()
-    for edge, count in edge_count.items():
-        if count == 1:
-            boundary_vertex_set.update(edge)
+    # Vertices at pullpoint locations are already guaranteed by mesh_polygon;
+    # find the closest existing vertex for each pullpoint.
+    pp_idx = []
+    for i in range(len(pullpoint_locations)):
+        dists = np.linalg.norm(mesh_vertices[:, :2] - pullpoint_locations[i, :2], axis=1)
+        idx = int(np.argmin(dists))
+        pp_idx.append(idx)
+        print(f"Pullpoint {i}: vertex {idx}, distance {dists[idx]:.6e}")
+    mesh_RF_triangles_updated = build_RF_matrix(mesh_triangles)
 
     ee_idx = []
     for i in range(len(ee_vertices_list)):
-        idx = np.argmin(np.linalg.norm(mesh_vertices - ee_vertices_list[i], axis=1))
-        mesh_vertices[idx] = ee_vertices_list[i]
+        dists = np.linalg.norm(mesh_vertices[:, :2] - ee_vertices_list[i, :2], axis=1)
+        idx = int(np.argmin(dists))
+        mesh_vertices[idx] = ee_vertices_list[i]  # snap to exact EE location
         ee_idx.append(idx)
     print("ee_idx:", ee_idx)
 
     edge_list, weight_list = generate_edge_matrix(mesh_vertices, mesh_triangles)
     bending_ele_idx, bending_ele_param, bending_weight_list = build_bending_elements(mesh_vertices, mesh_triangles)
-    bending_weight_list = [k_b * w for w in bending_weight_list]    
-    # print("\nmulti-edge mesh: interior edges =", len(ev2))
-    # print("flat-rest |K| max:", np.abs(K(mesh_vertices, ev2, c2)).max())
+    bending_weight_list = [k_b * w for w in bending_weight_list]
 
     neighbour_list, neighbour_edge_list = generate_neighbour_list(mesh_triangles, len(mesh_vertices), edge_list)
     area_list = cal_area_list(mesh_vertices, mesh_triangles)
-    mem_weight_list = [k_m * area for area in area_list]
+    L_list = generate_L_list(mesh_vertices, mesh_triangles)
+    mem_weight_list = [0 for _ in range(len(mesh_triangles))]
+    for i in range(len(mesh_triangles)):
+        mem_weight_list[i] = k_m * area_list[i] / (L_list[i]**2)
     initial_SK_list = get_ARAP_initial_SK_list(mesh_vertices, mesh_triangles, edge_list, weight_list, neighbour_list, neighbour_edge_list)
     stiffness_matrices = []
     for tri in mesh_RF_triangles_updated:
@@ -513,11 +584,15 @@ def generate_C_SRS_description(mesh_vertices, mesh_triangles, pullpoint_location
     return
 
 
+boundary = extract_boundary(DXF_PATH)
+mesh_vertices, mesh_triangles = mesh_polygon(boundary, pp_locations=pullpoint_locations[:, :2] * 1e3, max_area=MAX_AREA, min_angle=30)
+mesh_RF_triangles = build_RF_matrix(mesh_triangles)
+mesh_vertices = mesh_vertices * 1e-3  # mm → m
+mesh_vertices = np.hstack((mesh_vertices, np.zeros((mesh_vertices.shape[0], 1))))  # add z=0
+print("mesh_vertices shape:", mesh_vertices.shape)
+print("mesh_triangles shape:", mesh_triangles.shape)
+
 boundary_vertices = get_boundary_vertex_indices(mesh_triangles)
 print("boundary_vertices:", boundary_vertices)
-
-pullpoint_locations = np.array([[215, 10, 0], [250,80,0], [215, 150, 0], [180, 10, 0], [145, 80, 0], [180, 150,0]]) * 1e-3
-pulley_locations = np.array([[30, 10, 400], [30, 80, 400], [30, 150, 400], [10, 10, -259], [10, 80, -259], [10, 150, -259]]) * 1e-3
-ee_vertices_list = np.array([[270, 80, 0]]) * 1e-3
 
 generate_C_SRS_description(mesh_vertices, mesh_triangles, pullpoint_locations=pullpoint_locations, pulley_locations=pulley_locations, ee_vertices_list=ee_vertices_list, density=density, thickness=thickness, Youngs_modulus=Youngs_modulus, Poisson_ratio=Poisson_ratio)

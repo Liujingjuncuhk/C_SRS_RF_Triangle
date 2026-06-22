@@ -32,6 +32,11 @@ class Flying_carpet:
         self.bending_ele_param = self.description['bending_ele_param']
         self.bending_weight_list = self.description['bending_weight_list']
         self.mem_weight_list = self.description['mem_weight_list']
+        
+        print("max bending weight: ", np.max(self.bending_weight_list))
+        print("ave bending weight: ", np.mean(self.bending_weight_list))
+        print("max mem weight: ", np.max(self.mem_weight_list))
+        print("ave mem weight: ", np.mean(self.mem_weight_list))
         self.n_bending_ele = len(self.bending_ele_idx)
         self.thickness = self.description['thickness']
         self.Youngs_modulus = self.description['Youngs_modulus']
@@ -94,6 +99,10 @@ class Flying_carpet:
         mem_block   = 9  * self.num_triangles
         bend_block  = 3 * len(self.bending_ele_idx)
         cable_block = 3  * self.nCable
+        print("mem_block: ", mem_block)
+        print("num_triangles: ", self.num_triangles)
+        print("bend_block: ", bend_block)
+        print("cable_block: ", cable_block)
         matA_size = mem_block + bend_block + cable_block
         max_weight = np.max((np.max(self.bending_weight_list), np.max(self.mem_weight_list)))
         self.weight_cable = 10 * max_weight
@@ -144,10 +153,8 @@ class Flying_carpet:
             for k in range(3):
                 Bmat[3*i+k, i] = self.weight_cable * cable_vec_rotated[k]
         J = self.K_CG @ Bmat
-        print("CG Jacobian shape: ", J.shape)
         return J
         
-
     def get_ARAP_shape_list(self, vertices):
         ARAP_shape_list = self.initial_ARAP_shape_list.copy()
         for i in range(self.num_vertices):
@@ -226,8 +233,7 @@ class Flying_carpet:
                 bVec[self.matA_all.shape[0] - 3*self.nCable + 3*i+k] += self.weight_cable * vec_rotated[k] * tar_cable_length[i] + self.weight_cable * self.pulley_location[i, k]
         return bVec
     
-
-    def FKD_time(self, target_cable_length, total_time, starting_vertices, tol = 2e-5):
+    def FKD_time(self, target_cable_length, total_time, starting_vertices, tol = 2e-5, show_info = False):
         if starting_vertices.shape[0] == 3*self.num_vertices:
             Q_a = starting_vertices.copy()
         elif starting_vertices.shape[0] == self.num_vertices:
@@ -237,7 +243,7 @@ class Flying_carpet:
         Q_a = Q_a.reshape((3*self.num_vertices, ))
         Q_ad = np.zeros((3*self.num_vertices, ))
         t_a = 0.0
-        h = 0.01
+        h = 0.04
         phi_Qfree = np.zeros((self.nCable, 1))
         H_free = np.zeros((self.nCable, 3*self.num_vertices))
         Q_list = [Q_a.copy()]
@@ -272,7 +278,12 @@ class Flying_carpet:
             Z1 = lu_solve((lu, piv), H_free.T)                   # (3n, nCable)
             lcp_Mmat = h * H_free @ self.W_mat @ Z1
             lcp_q = phi_Qfree.reshape((self.nCable,))
-            cable_tension = projected_gauss_seidel_lcp(lcp_Mmat, lcp_q)
+            # cable_tension = projected_gauss_seidel_lcp(lcp_Mmat, lcp_q)
+            lcp_sol = qe.optimize.lcp_lemke(lcp_Mmat, lcp_q)
+            if not lcp_sol.success:
+                print("lcp failed: ")
+                break
+            cable_tension = lcp_sol.z
             Z2 = lu_solve((lu, piv), self.W_mat @ H_free.T)
             dv_cor = Z2 @ cable_tension
             dv = dv_free + dv_cor
@@ -290,7 +301,8 @@ class Flying_carpet:
                     print(f"Converged at time {t_a:.2f} with diff {diff:.6f} for 10 consecutive steps, stopping simulation.")
                     break
             t3 = time.time()
-            # print(f"t_a: {t_a:.3f}, diff: {diff:.7f}, time for R_list: {t1-t0:.4f}s, time for K_mat: {t2-t1:.4f}s, total time for this step: {t3-t0:.4f}s")
+            if show_info:
+                print(f"t_a: {t_a:.3f}, diff: {diff:.7f}, time for R_list: {t1-t0:.4f}s, time for K_mat: {t2-t1:.4f}s, total time for this step: {t3-t0:.4f}s")
         t_end = time.time()
         print(f"Total simulation time: {t_end - t_start:.2f}s")
         vert_length = self.q_to_vertices(Q_a)
@@ -317,6 +329,7 @@ class Flying_carpet:
         def get_jacobian(Q):
             ee_poses = self.get_ee_poses(Q)
             Jac_CG = self.get_CG_Jacobian(Q)
+            print("Jac_CG shape: ", Jac_CG.shape)
             Jacobian = np.zeros((self.nCable, ))
             for i in range(self.nCable):
                 for j in range(len(self.ee_idx)):
@@ -326,35 +339,37 @@ class Flying_carpet:
             return Jacobian
         
         cur_length = self.get_cable_length(Q)
-        Q_list, starting_vertices, cable_tension = self.FKD_time(cur_length, 1, starting_vertices)
+        Q_list, starting_vertices, cable_tension = self.FKD_time(cur_length, 1, starting_vertices, tol = 2e-5)
         Q = self.vertices_to_q(starting_vertices)
         final_Q_list = [Q.copy()]
         for i in range(max_iter):
-            dl = 10
+            dl = 0.1
             jac = get_jacobian(Q)
             diff = get_diff(Q)
             cur_length = self.get_cable_length(Q)
             cmd_diff = [0 for _ in range(self.nCable)]
             cmd_length = cur_length.copy()
-            # alpha = 10
+            # alpha = 1
             # dl = alpha*diff/(np.max(np.abs(jac))+1e-6)
             for k in range(self.nCable):
-                if cable_tension[k] < 1e-5 and jac[k]   < 0:
+                if cable_tension[k] < 1e-5 and jac[k]< 0:
                     cmd_diff[k] = 0
                 else:
                     cmd_diff[k] = -dl * jac[k]
-            cmd_diff = clamp_diff(cmd_diff, min_bound = 1e-3, max_bound = 0.03)
+            # for k in range(self.nCable):
+            #     cmd_diff[k] = -dl * jac[k]
+            cmd_diff = clamp_diff(cmd_diff, min_bound = 1e-3, max_bound = 0.01)
             for k in range(self.nCable):
                 cmd_length[k] += cmd_diff[k]
             Q_list, starting_vertices, cable_tension = self.FKD_time(cmd_length, 1, Q, tol = 1e-4)
             
-            self.visualize_IKD_result(target_EE_pos, starting_vertices)
+            # self.visualize_IKD_result(target_EE_pos, starting_vertices)
             # input("Press Enter to continue...")
             Q = self.vertices_to_q(starting_vertices)
             final_Q_list.append(Q.copy())
             diff_cart = get_diff_cartesian(Q)
-            print("Iteration {}: diff = {}, diff_cart = {}, Jacobian: {}".format(i, diff, diff_cart,  np.round(jac, 5)))
-            if diff < tol:
+            print("Iteration {}: diff = {}, diff_cart = {}, dl = {}, Jacobian: {}, cable_tension: {}, cmd_diff: {}".format(i, diff, diff_cart, dl, np.round(jac, 5), np.round(cable_tension, 5), np.round(cmd_diff, 5)))
+            if diff_cart < tol:
                 print("Converged at iteration {} with diff {}".format(i, diff))
                 break
             cur_length = self.get_cable_length(Q)
@@ -517,6 +532,89 @@ class Flying_carpet:
         plotter.add_legend()
         plotter.show()
 
+    def check_bending_params(self):
+        val_list = []
+        for i in range(len(self.bending_ele_idx)):
+            v0, v1, v2, v3 = self.bending_ele_idx[i]
+            c1, c2, c3, c4 = self.bending_ele_param[i]
+            val = c1 * self.vertices[v0] + c2 * self.vertices[v1] + c3 * self.vertices[v2] + c4 * self.vertices[v3]
+            val_list.append(val)
+        val_array = np.array(val_list)
+        print("Bending param values: ", val_array)
+        # check if val_array is close to zero
+        if np.all(np.linalg.norm(val_array, axis=1) < 1e-6):
+            print("Bending params are valid.")
+
+    def get_bending_energy(self, vertices):
+        if vertices.shape[0] != self.num_vertices:
+            vertices = self.q_to_vertices(vertices)
+        energy = 0
+        for i in range(len(self.bending_ele_idx)):
+            v0, v1, v2, v3 = self.bending_ele_idx[i]
+            c1, c2, c3, c4 = self.bending_ele_param[i]
+            val = c1 * vertices[v0] + c2 * vertices[v1] + c3 * vertices[v2] + c4 * vertices[v3]
+            energy += self.bending_weight_list[i] * np.linalg.norm(val)**2
+        return energy
+            
+
+    def replay_Q_list(self, Q_list, filePath="./flying_carpet_FKD.mp4", framerate=10,
+                       window_size=(1024, 768)):
+        def _to_vertices(Q):
+            if Q.shape[0] == 3 * self.num_vertices:
+                return self.q_to_vertices(Q)
+            return Q
+
+        plotter = pv.Plotter(off_screen=True, window_size=window_size)
+
+        vertices0 = _to_vertices(Q_list[0])
+        faces = np.hstack((np.full((self.mesh_triangles.shape[0], 1), 3), self.mesh_triangles))
+
+        # Build all actors once; update .points in-place each frame
+        surf = pv.PolyData(vertices0.copy(), faces)
+        plotter.add_mesh(surf, color='lightgray', show_edges=True)
+
+        pp_cloud = pv.PolyData(vertices0[self.pp_idx].copy())
+        plotter.add_mesh(pp_cloud, color='blue', point_size=10,
+                         render_points_as_spheres=True, label='Pull points')
+
+        pulley_cloud = pv.PolyData(self.pulley_location.copy())
+        plotter.add_mesh(pulley_cloud, color='cyan', point_size=10,
+                         render_points_as_spheres=True, label='Pulleys')
+
+        ee_cloud = pv.PolyData(vertices0[self.ee_idx].copy())
+        plotter.add_mesh(ee_cloud, color='red', point_size=10,
+                         render_points_as_spheres=True, label='End Effectors')
+
+        # All cable segments in a single PolyData so points update in-place
+        cable_pts = np.empty((2 * self.nCable, 3))
+        for i in range(self.nCable):
+            cable_pts[2 * i]     = vertices0[self.pp_idx[i]]
+            cable_pts[2 * i + 1] = self.pulley_location[i]
+        cable_lines = np.array([[2, 2 * i, 2 * i + 1]
+                                 for i in range(self.nCable)]).flatten()
+        cables = pv.PolyData()
+        cables.points = cable_pts.copy()
+        cables.lines = cable_lines
+        plotter.add_mesh(cables, color='blue', line_width=2)
+
+        plotter.show_grid()
+        plotter.show_axes()
+        plotter.add_legend()
+        plotter.open_movie(filePath, framerate=framerate)
+
+        for Q in Q_list:
+            vertices = _to_vertices(Q)
+            surf.points = vertices.copy()
+            pp_cloud.points = vertices[self.pp_idx].copy()
+            ee_cloud.points = vertices[self.ee_idx].copy()
+            for i in range(self.nCable):
+                cable_pts[2 * i] = vertices[self.pp_idx[i]]
+            cables.points = cable_pts.copy()
+            plotter.write_frame()
+
+        plotter.close()
+
+
     def replay_IKD_Q_list(self, target_EE_pos, Q_list, filePath="./flying_carpet_IKD.mp4", window_size=(1024, 768), framerate=1):
         def _to_vertices(Q):
             if Q.shape[0] == 3 * self.num_vertices:
@@ -580,14 +678,19 @@ class Flying_carpet:
 if __name__ == "__main__":
     description_file = "./models/flying_carpet/flying_carpet_description.pkl"
     flying_carpet = Flying_carpet(description_file)
+    # flying_carpet.check_bending_params()
     # exit(0)
     # flying_carpet.visualize_vert(flying_carpet.vertices)
     icl = flying_carpet.initial_cable_length
     shortened_length = 0.05
     tcl = [icl[0]-shortened_length, icl[1]-shortened_length, icl[2]-shortened_length, icl[3]-shortened_length, icl[4], icl[5], icl[6], icl[7]]
-    # Q_list, vert_length, cable_tension = flying_carpet.FKD_time(tcl, 1, flying_carpet.vertices, tol = 1e-5)
-    vert_length = flying_carpet.deform_CG(tcl, flying_carpet.vertices, max_iter=1000, tol=1e-9)
-    # fcl = flying_carpet.get_cable_length(vert_length)
+    Q_list, vert_length, cable_tension = flying_carpet.FKD_time(tcl, 1, flying_carpet.vertices, tol = 1e-5, show_info=True)
+    # flying_carpet.replay_Q_list(Q_list, filePath="./flying_carpet_FKD.mp4", framerate=10)
+    fcl = flying_carpet.get_cable_length(vert_length)
+    diff_cl = [fcl[i] - tcl[i] for i in range(flying_carpet.nCable)]
+    # print("Final cable length: ", fcl)
+    print("Difference in cable length: ", diff_cl)
+
     # vert_cg = flying_carpet.deform_CG(fcl, flying_carpet.vertices, max_iter=1000, tol=1e-9)
     flying_carpet.visualize_vert(vert_length)
     # flying_carpet.visualize_vert(vert_cg)
