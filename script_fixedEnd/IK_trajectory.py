@@ -29,9 +29,9 @@ if __name__ == "__main__":
     c_srs.visualize_planned_traj(c_srs.vertices, ee_target_list)
     starting_vert = c_srs.vertices
     for ee_target in ee_target_list:
-        # tcl = c_srs.ikModel.predict_cable_length(ee_target)
+        tcl = c_srs.ikModel.predict_cable_length(ee_target)
         # print(tcl)   # → 6 cable lengths in metres
-        # Q_list, starting_vert, cable_tension = c_srs.FKD_time(tcl, 1, starting_vert, tol = 1e-5)
+        Q_list, starting_vert, cable_tension = c_srs.FKD_time(tcl, 1, starting_vert, tol = 1e-5)
         cur_length, starting_vertices, Q_list = c_srs.IKD_single(ee_target, starting_vert,AA = False, tol=2e-3)
         c_srs.replay_IKD_Q_list(ee_target, Q_list, filePath="./C_SRS_IKD.mp4", framerate=1)
         c_srs.visualize_IKD_result(starting_vert, ee_target)

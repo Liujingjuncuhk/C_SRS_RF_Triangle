@@ -309,9 +309,117 @@ def find_containing_triangle(mesh_vertices, mesh_triangles, point):
             return ti
     return -1
 
+def _cot(u, v):
+    """Cotangent of the angle between vectors u and v."""
+    dot = np.dot(u, v)
+    sin = np.linalg.norm(np.cross(u, v))
+    return dot / max(sin, 1e-12)
+
+
+def build_bending_elements(mesh_vertices, mesh_triangles, k_bend=1.0):
+    """
+    Linear bending-curvature stencil + ShapeUp/Projective-Dynamics weight for every
+    interior (non-boundary) edge of a flat-rest triangle mesh.
+ 
+    Stencil: gradient of the dihedral angle at the flat configuration
+    (Bridson et al. 2003; Wardetzky et al. 2007). For each interior edge:
+        v1, v2  = shared edge endpoints
+        v3      = apex of triangle A = (v1, v2, v3)
+        v4      = apex of triangle B = (v1, v2, v4)
+    The hinge bending curvature is linear in the four node positions:
+        K = c0*x_v1 + c1*x_v2 + c2*x_v3 + c3*x_v4
+    Each c-row sums to zero (translation invariance); K = 0 at the flat rest state.
+ 
+    Weight: quadratic-bending stiffness of Bergou et al. 2006, as used by the
+    ShapeUp / Projective Dynamics bending constraint (Bouaziz et al. 2012, 2014 §5.4):
+        w_e = k_bend * 3 * ||e||^2 / Abar_e
+    where ||e|| is the shared-edge rest length and Abar_e = (A_A + A_B)/3 is the
+    combined (one-third) area of the two incident triangles. The bending energy of
+    the hinge is  0.5 * w_e * ||K||^2, contributing w_e * c c^T to the global matrix.
+ 
+    Parameters
+    ----------
+    mesh_vertices  : (N, 3) array of initial (rest) vertex positions
+    mesh_triangles : (M, 3) int array of triangle vertex indices
+    k_bend         : float, scalar bending stiffness (material/thickness factor)
+ 
+    Returns
+    -------
+    edge_vertices : (n_inner, 4) int array    rows [v1, v2, v3, v4]
+    c_val_matrix  : (n_inner, 4) float array  rows [c0, c1, c2, c3]
+    weight_list   : (n_inner,)  float array   ShapeUp weights w_e
+    """
+    V = np.asarray(mesh_vertices, dtype=float)
+    F = np.asarray(mesh_triangles, dtype=np.int64)
+ 
+    edge_map = {}
+    for tri in F:
+        i, j, k = int(tri[0]), int(tri[1]), int(tri[2])
+        for a, b, apex in ((i, j, k), (j, k, i), (k, i, j)):
+            key = (a, b) if a < b else (b, a)
+            edge_map.setdefault(key, []).append(apex)
+ 
+    edge_vertices = []
+    c_val_matrix = []
+    weight_list = []
+ 
+    for (v1, v2), apexes in edge_map.items():
+        if len(apexes) != 2:
+            continue  # boundary (1 triangle) or non-manifold (>2): no bending
+        v3, v4 = apexes
+        p1, p2, p3, p4 = V[v1], V[v2], V[v3], V[v4]
+ 
+        e = p2 - p1
+        Le = np.linalg.norm(e)
+        if Le < 1e-14:
+            continue
+ 
+        # apex heights to the shared-edge line
+        ee = np.dot(e, e)
+        proj3 = p1 + (np.dot(p3 - p1, e) / ee) * e
+        proj4 = p1 + (np.dot(p4 - p1, e) / ee) * e
+        hA = np.linalg.norm(p3 - proj3)
+        hB = np.linalg.norm(p4 - proj4)
+ 
+        # cotangents of the angles at the edge endpoints, per triangle
+        a1 = _cot(p3 - p1, p2 - p1)   # angle at v1 in A
+        a2 = _cot(p3 - p2, p1 - p2)   # angle at v2 in A
+        b1 = _cot(p4 - p1, p2 - p1)   # angle at v1 in B
+        b2 = _cot(p4 - p2, p1 - p2)   # angle at v2 in B
+ 
+        # barycentric split of each apex's contribution onto the two endpoints
+        wA1 = a2 / (a1 + a2)
+        wA2 = a1 / (a1 + a2)
+        wB1 = b2 / (b1 + b2)
+        wB2 = b1 / (b1 + b2)
+ 
+        c3 = Le / hA
+        c4 = Le / hB
+        c1 = -(Le / hA) * wA1 - (Le / hB) * wB1
+        c2 = -(Le / hA) * wA2 - (Le / hB) * wB2
+ 
+        # combined hinge area Abar = (A_A + A_B)/3  and Bergou bending weight
+        AA = 0.5 * Le * hA
+        AB = 0.5 * Le * hB
+        Abar = (AA + AB) / 3.0
+        w_e = k_bend * 3.0 * Le * Le / Abar
+ 
+        edge_vertices.append([v1, v2, v3, v4])
+        c_val_matrix.append([c1, c2, c3, c4])
+        weight_list.append(w_e)
+ 
+    return (np.array(edge_vertices, dtype=np.int64),
+            np.array(c_val_matrix, dtype=float),
+            np.array(weight_list, dtype=float))
+
 
 def generate_C_SRS_description(mesh_vertices, mesh_triangles, pullpoint_locations, pulley_locations, density, thickness, Youngs_modulus, Poisson_ratio):
-    
+    k_m = Youngs_modulus * thickness / (1-Poisson_ratio**2)
+    k_b = Youngs_modulus * thickness**3 / (12 * (1-Poisson_ratio**2))
+    def K(Vx, ev2, c2):
+        return np.array([c2[e,0]*Vx[ev2[e,0]]+c2[e,1]*Vx[ev2[e,1]]+
+                        c2[e,2]*Vx[ev2[e,2]]+c2[e,3]*Vx[ev2[e,3]]
+                        for e in range(len(ev2))])
 
     # Add a new vertex at each pullpoint by splitting the containing triangle into 3
     pp_idx = []
@@ -350,8 +458,14 @@ def generate_C_SRS_description(mesh_vertices, mesh_triangles, pullpoint_location
     ee_idx = pp_idx.copy() # for this example, we can just set the ee vertices to be the same as pullpoint vertices, since we don't have a specific end-effector shape in mind. In practice, you can specify different ee vertices based on your requirements.
 
     edge_list, weight_list = generate_edge_matrix(mesh_vertices, mesh_triangles)
+
+    edge_list, weight_list = generate_edge_matrix(mesh_vertices, mesh_triangles)
+    bending_ele_idx, bending_ele_param, bending_weight_list = build_bending_elements(mesh_vertices, mesh_triangles)
+    bending_weight_list = [k_b * w for w in bending_weight_list]    
+
     neighbour_list, neighbour_edge_list = generate_neighbour_list(mesh_triangles, len(mesh_vertices), edge_list)
     area_list = cal_area_list(mesh_vertices, mesh_triangles)
+    mem_weight_list = [k_m * area for area in area_list]
     initial_SK_list = get_ARAP_initial_SK_list(mesh_vertices, mesh_triangles, edge_list, weight_list, neighbour_list, neighbour_edge_list)
     stiffness_matrices = []
     for tri in mesh_RF_triangles_updated:
@@ -370,6 +484,10 @@ def generate_C_SRS_description(mesh_vertices, mesh_triangles, pullpoint_location
             "neighbour_list": neighbour_list,
             "neighbour_edge_list": neighbour_edge_list,
             "area_list": area_list,
+            "bending_ele_idx": bending_ele_idx,
+            "bending_ele_param": bending_ele_param,
+            "bending_weight_list": bending_weight_list,
+            "mem_weight_list": mem_weight_list,
             "initial_ARAP_SK_list": initial_SK_list,
             "stiffness_matrices": stiffness_matrices,
             "mass_matrix": mass_mat,

@@ -27,6 +27,11 @@ class C_SRS_fixedEnd:
         self.num_RF_triangles = self.mesh_RF_triangles.shape[0]
         self.initial_ARAP_SK_list = self.description['initial_ARAP_SK_list']
         self.area_list = self.description['area_list']
+        self.bending_ele_idx = self.description['bending_ele_idx']
+        self.bending_ele_param = self.description['bending_ele_param']
+        self.bending_weight_list = self.description['bending_weight_list']
+        self.mem_weight_list = self.description['mem_weight_list']
+        self.n_bending_ele = len(self.bending_ele_idx)
         self.thickness = self.description['thickness']
         self.Youngs_modulus = self.description['Youngs_modulus']
         self.Poisson_ratio = self.description['Poisson_ratio']
@@ -77,6 +82,14 @@ class C_SRS_fixedEnd:
                         self.N1818[3*i+j, 3*k+j] = 5.0/6.0
                     else:
                         self.N1818[3*i+j, 3*k+j] = -1.0/6.0
+        self.N99 =  np.zeros((9, 9))
+        for i in range(3):
+            for j in range(3):
+                for k in range(3):
+                    if k==i:
+                        self.N99[3*i+j, 3*k+j] = 2.0/3.0
+                    else:
+                        self.N99[3*i+j, 3*k+j] = -1.0/3.0
         self.nMoving = self.num_vertices - self.nFixed
         self.initial_ARAP_shape_list = []
         for i in range(self.num_vertices):
@@ -98,53 +111,55 @@ class C_SRS_fixedEnd:
         # exit(0)
 
     def assemble_CG_matrices(self):
-        matA_size = 0
-        max_weight = 0
-        for i in range(self.num_vertices):
-            for weight in self.neighbour_edge_weight_list[i]:
-                if weight > max_weight:
-                    max_weight = weight
+        mem_block   = 9  * self.num_triangles
+        bend_block  = 3 * len(self.bending_ele_idx)
+        cable_block = 3  * self.nCable
+        matA_size = mem_block + bend_block + cable_block
+        max_weight = np.max((np.max(self.mem_weight_list), np.max(self.bending_weight_list)))
+
         self.weight_cable = 10 * max_weight
         self.nNeighbour_list = []
         for i in range(self.num_vertices):
             self.nNeighbour_list.append(len(self.neighbour_list[i]))
-        for i in range(self.num_vertices):
-            if self.idxAll_2_idxMoving[i] == -1:
-                continue
-            matA_size += len(self.neighbour_edge_list[i])*3
-        self.matA_all = np.zeros((matA_size + 3*self.nCable, 3*self.nMoving))
+        self.matA_initial = np.zeros((matA_size, 3*self.num_vertices))
         print("matA_size: ", matA_size)
-        self.vecB_2_add = np.zeros((matA_size + 3*self.nCable, ))
-        cur_row = 0
-        for i in range(self.num_vertices):
-            if self.idxAll_2_idxMoving[i] == -1:
-                continue
-            neighbour_list = self.neighbour_list[i]
-            # print("neighbour_list of vertex {}: {}".format(i, neighbour_list))
-            idx_moving = self.idxAll_2_idxMoving[i]
-            for j in range(len(neighbour_list)):
-                neighbour_idx = neighbour_list[j]
-                if self.idxAll_2_idxMoving[neighbour_idx] == -1: # fixed vertex connected to moving vertex
-                    weight = self.neighbour_edge_weight_list[i][j]
-                    for k in range(3):
-                        self.matA_all[cur_row+k, 3*idx_moving+k] -= weight
-                        self.vecB_2_add[cur_row+k] -= weight * self.vertices[i][k]
-                    cur_row += 3
-                else:
-                    weight = self.neighbour_edge_weight_list[i][j]
-                    idx_neighbour_moving = self.idxAll_2_idxMoving[neighbour_idx]
-                    for k in range(3):
-                        self.matA_all[cur_row+k, 3*idx_moving+k] -= weight
-                        self.matA_all[cur_row+k, 3*idx_neighbour_moving+k] += weight
-                    cur_row += 3
-        print("cur_row after ARAP: ", cur_row)
+        self.vecB_2_add = np.zeros((matA_size, ))
+
+        # Membrane blocks: w * (N33 ⊗ I_3) per triangle
+        # Row (9i + 3j + k): centroid-subtracted position of local vertex j, coord k
+        #   col 3*v_j  + k : +2/3   (same vertex, same coord)
+        #   col 3*v_j' + k : -1/3   (other triangle vertices, same coord k)
+        for i in range(self.num_triangles):
+            mem_weight = self.mem_weight_list[i]
+            for j in range(3):          # local vertex (row block)
+                idx_row_start = 9*i + 3*j
+                for k in range(3):      # coordinate direction
+                    for jp in range(3): # iterate over all triangle vertices (columns)
+                        v_jp = self.mesh_triangles[i][jp]
+                        coeff = (2.0/3.0) if jp == j else (-1.0/3.0)
+                        self.matA_initial[idx_row_start+k, 3*v_jp+k] = mem_weight * coeff
+
+        for i in range(len(self.bending_ele_idx)):
+            bending_weight = self.bending_weight_list[i]
+            v0, v1, v2, v3 = self.bending_ele_idx[i]
+            c1, c2, c3, c4 = self.bending_ele_param[i]
+            for j in range(4):
+                v_idx = self.bending_ele_idx[i,j]
+                c = self.bending_ele_param[i,j]
+                for k in range(3):
+                    self.matA_initial[mem_block + 3*i + k, 3*v_idx+k] = bending_weight * c
+
         for i in range(self.nCable):
             idx_pp = self.pp_idx[i]
-            idx_pp_moving = self.idxAll_2_idxMoving[idx_pp]
             for k in range(3):
-                self.matA_all[matA_size + 3*i+k, 3*idx_pp_moving+k] += self.weight_cable
-                self.vecB_2_add[matA_size + 3*i+k] += self.weight_cable * self.pulley_location[i, k]
-        
+                self.matA_initial[mem_block + bend_block + 3*i+k, 3*idx_pp+k] += self.weight_cable
+        self.matA_all = np.zeros((matA_size, 3*self.nMoving))
+        for i in range(self.num_vertices):
+            idx_moving = self.idxAll_2_idxMoving[i]
+            if idx_moving != -1:
+                self.matA_all[:, 3*idx_moving:3*idx_moving+3] = self.matA_initial[:, 3*i:3*i+3]
+            else:
+                self.vecB_2_add -= self.matA_initial[:, 3*i:3*i+3] @ self.vertices[i]
         print("matA_all shape: ", self.matA_all.shape)
         print("matA_all rank: ", np.linalg.matrix_rank(self.matA_all))
         self.matAT = self.matA_all.T
@@ -166,6 +181,19 @@ class C_SRS_fixedEnd:
                 ARAP_shape[j] = vertices[neighbour_idx] - vertices[i]
             ARAP_shape_list[self.idxAll_2_idxMoving[i]] = ARAP_shape
         return ARAP_shape_list
+
+    def get_rotation_tri(self, vertices):
+        R_list = [np.eye(3) for _ in range(self.num_triangles)]
+        for i in range(self.num_triangles):
+            tri = self.mesh_triangles[i]
+            v0, v1, v2 = tri
+            initial_tri_sk = self.initial_tri_SK_list[i]
+            cur_tri = vertices[tri]
+            cur_tri_sk = self.N33 @ cur_tri
+            u, s, vh = np.linalg.svd(cur_tri_sk.T @ initial_tri_sk)
+            R = u @ vh
+            R_list[i] = R
+        return R_list
 
     def get_rotation_ARAP(self, ARAP_shape_list):
         R_list = [np.eye(3) for _ in range(self.nMoving)]
@@ -200,22 +228,18 @@ class C_SRS_fixedEnd:
             R_list[i] = R
         return R_list
 
-    def get_Bvec_CG(self, R_list_CG, R_list_cable, tar_cable_length):
+    def get_Bvec_CG(self, R_list_tri, R_list_cable, tar_cable_length):
         matA_shape = self.matA_all.shape[0]
         bVec = np.zeros((matA_shape, ))
         cur_row = 0
-        for i in range(self.num_vertices):
-            if self.idxAll_2_idxMoving[i] == -1:
-                continue
-            idx_moving = self.idxAll_2_idxMoving[i]
-            initial_ARAP_shape = self.initial_ARAP_shape_list[idx_moving]
-            R_ARAP = R_list_CG[idx_moving]
-            for j in range(initial_ARAP_shape.shape[0]):
-                weight = self.neighbour_edge_weight_list[i][j]
-                vec_rotated = R_ARAP @ initial_ARAP_shape[j]
-                for k in range(3):
-                    bVec[cur_row+k] += weight * vec_rotated[k]
-                cur_row += 3
+        for i in range(self.num_triangles):
+            initial_tri_sk = self.initial_tri_SK_list[i]
+            R_tri = R_list_tri[i]
+            for j in range(3):          # local vertex (row block)
+                idx_row_start = 9*i + 3*j
+                for k in range(3):      # coordinate direction
+                    bVec[idx_row_start+k] += self.mem_weight_list[i] * (R_tri @ initial_tri_sk.T).T[j, k]
+
         # print("bvec shape: ", bVec.shape)
         for i in range(self.nCable):
             idx_pp = self.pp_idx[i]
@@ -224,7 +248,8 @@ class C_SRS_fixedEnd:
             initial_cable_vec = self.initial_cable_vec[i]
             vec_rotated = R_cable @ initial_cable_vec
             for k in range(3):
-                bVec[self.matA_all.shape[0] - 3*self.nCable + 3*i+k] += self.weight_cable * vec_rotated[k] * tar_cable_length[i]
+                bVec[self.matA_all.shape[0] - 3*self.nCable + 3*i+k] += self.weight_cable * (vec_rotated[k] * tar_cable_length[i] + self.pulley_location[i, k])
+        
         return bVec
     
     def get_CG_Jacobian(self, vertices):
@@ -237,7 +262,7 @@ class C_SRS_fixedEnd:
             for k in range(3):
                 Bmat[3*i+k, i] = self.weight_cable * cable_vec_rotated[k]
         J = self.K_CG @ Bmat
-        print("CG Jacobian shape: ", J.shape)
+        # print("CG Jacobian shape: ", J.shape)
         return J
         
 
@@ -246,17 +271,15 @@ class C_SRS_fixedEnd:
         cur_q = self.vertices_to_q(starting_vertices)
         q_last = cur_q.copy()
         for i in range(max_iter):
-            cur_ARAP_shape_list = self.get_ARAP_shape_list(cur_vertices)
-            R_list_CG = self.get_rotation_ARAP(cur_ARAP_shape_list)
-            # R_list_CG = [np.eye(3) for _ in range(self.nMoving)]
             R_list_cable = self.get_rotation_cable(cur_vertices)
-            bVec = self.get_Bvec_CG(R_list_CG, R_list_cable, tar_cable_length)
+            R_list_tri = self.get_rotation_tri(cur_vertices)
+            bVec = self.get_Bvec_CG(R_list_tri, R_list_cable, tar_cable_length)
             cur_q_moving = self.matATA_inv_AT @ (bVec + self.vecB_2_add)
             cur_q = self.q_moving_to_q(cur_q_moving)
             cur_vertices = self.q_to_vertices(cur_q)
             diff = np.linalg.norm(cur_q - q_last)/(3*self.num_vertices)
             q_last = cur_q.copy()
-            # print("ARAP iteration {}: diff = {}".format(i, diff))
+            print("cg iteration {}: diff = {}".format(i, diff))
             if diff < tol:
                 break
         return cur_vertices
@@ -285,11 +308,15 @@ class C_SRS_fixedEnd:
             t1 = time.time()
             K_mat, f0 = self.assemble_K(R_list_1818)
             t2 = time.time()
-            A_mat = (1.0/h)*np.eye(3*self.num_vertices) + h * self.W_mat @ K_mat
-            # A_inv = np.linalg.inv(A_mat)
+            disp = Q_a - self.vertices_to_q(self.vertices)
+            denom = disp @ self.mass_matrix @ disp
+            damping_coeff = np.sqrt((disp @ K_mat @ disp) / denom) if denom > 1e-30 else 0.0
+            C_mat = 2 * damping_coeff * self.mass_matrix
+
+            A_mat = (1.0/h)*np.eye(3*self.num_vertices) + h * self.W_mat @ K_mat + self.W_mat @ C_mat
             lu, piv = lu_factor(A_mat)
 
-            b_vec = self.W_mat @ (-K_mat @ (Q_a + h * Q_ad) + f0 + self.gravity_vec)
+            b_vec = self.W_mat @ (-K_mat @ (Q_a + h * Q_ad) + f0 + self.gravity_vec - C_mat @ Q_ad)
             # dv_free = A_inv @ b_vec
             dv_free = lu_solve((lu, piv), b_vec)
 
@@ -362,7 +389,7 @@ class C_SRS_fixedEnd:
     def IKD_single(self, target_ee_pos, starting_vertices, AA = False, tol = 1e-3):
         idx_ee = self.ee_idx[0]
         idx_ee_moving = self.idxAll_2_idxMoving[idx_ee]
-        max_iter = 100
+        max_iter = 50
         AA_memory = 5
         aa_cl_list = np.zeros((AA_memory, self.nCable))
         aa_diff_list = np.zeros((AA_memory, ))
@@ -444,7 +471,7 @@ class C_SRS_fixedEnd:
             cmd_diff = clamp_diff(cmd_diff, min_bound = 1e-3, max_bound = 5e-3)
             for k in range(self.nCable):
                 cmd_length[k] += cmd_diff[k]
-            Q_list, starting_vertices, cable_tension = self.FKD_time(cmd_length, 1, Q)
+            Q_list, starting_vertices, cable_tension = self.FKD_time(cmd_length, 1, Q, tol = 1e-5)
             Q = self.vertices_to_q(starting_vertices)
             diff = get_diff(Q)
             if AA:
@@ -463,7 +490,7 @@ class C_SRS_fixedEnd:
                     aa_cl_list = np.zeros((AA_memory, self.nCable))
                     aa_diff_list = np.zeros((AA_memory, ))
                     aa_ee_pos_list = np.zeros((AA_memory, 3))
-                    Q_list, starting_vertices, cable_tension = self.FKD_time(cl_cmd_next, 1, Q)
+                    Q_list, starting_vertices, cable_tension = self.FKD_time(cl_cmd_next, 1, Q, tol = 1e-5)
                     Q = self.vertices_to_q(starting_vertices)
             diff = np.sqrt(2*diff)
             print("Iteration {}: diff = {}, dl = {}, Jacobian: {}, cmd_diff: {}".format(i, diff, dl, np.round(jac, 5), np.round(cmd_diff, 5)))
@@ -1079,10 +1106,10 @@ if __name__ == "__main__":
     # c_srs.generate_ws(cl_range_2, total_number=1000, saveFile='training_data_2.pkl')
     # exit(0)
     tcl = [icl[0]-0.02, icl[1]-0.02, icl[2]-0.02, icl[3], icl[4], icl[5]]
-    Q_list, vert_length, cable_tension = c_srs.FKD_time(tcl, 1, c_srs.vertices, tol = 1e-7, show_info = True)
+    Q_list, vert_length, cable_tension = c_srs.FKD_time(tcl, 1, c_srs.vertices, tol = 1e-4, show_info = True)
     fcl = c_srs.get_cable_length(vert_length)
     vert_cg = c_srs.deform_CG(fcl, c_srs.vertices)
-    print("cable tension: ", cable_tension)
+    # print("cable tension: ", cable_tension)
     c_srs.visualize_vert(vert_length)
     c_srs.visualize_vert(vert_cg)
     exit(0)
