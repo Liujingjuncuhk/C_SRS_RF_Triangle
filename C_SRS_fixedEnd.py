@@ -15,7 +15,10 @@ class C_SRS_fixedEnd:
         self.vertices = self.description['mesh_vertices']
         self.mesh_triangles = self.description['mesh_triangles']
         # check if there are <0 element in mesh_RF_triangles
-        self.pp_idx = self.description['pp_idx']
+        # self.pp_idx = self.description['pp_idx']
+        self.pp_bary_tri_idx = self.description['pp_bary_tri_idx']
+        self.pp_bary_coords = self.description['pp_bary_coords']
+        self.pp_bary_offsets = self.description['pp_bary_offsets']
         self.pulley_location = self.description['pulley_locations']
         self.mesh_RF_triangles = self.description['mesh_RF_triangles']
         self.ee_idx = self.description['ee_idx']
@@ -51,7 +54,7 @@ class C_SRS_fixedEnd:
         self.N33 = np.eye(3) - 1/3*np.ones((3,3))
         self.initial_tri_SK_list = self.get_tri_SK_list(self.vertices)
         self.nCable = len(self.pulley_location)
-        self.initial_cable_length = self.get_cable_length(self.vertices)
+        self.initial_cable_length = self.get_cable_length_bary(self.vertices)
         self.fixed_region = [[-0.1, 0.02], [-0.1, 1]]
         self.get_fixed_idx(self.vertices, self.fixed_region)
         self.nFixed = len(self.fixed_idx)
@@ -74,6 +77,7 @@ class C_SRS_fixedEnd:
                 if tri[j] == -1:
                     continue
                 self.qe0_list[i][3*j:3*j+3] = self.vertices[tri[j]]
+        self.N44 = np.eye(4) - 1/4*np.ones((4,4))
         self.N1818 = np.zeros((18, 18))
         for i in range(6):
             for j in range(3):
@@ -90,6 +94,14 @@ class C_SRS_fixedEnd:
                         self.N99[3*i+j, 3*k+j] = 2.0/3.0
                     else:
                         self.N99[3*i+j, 3*k+j] = -1.0/3.0
+        self.N1212 = np.zeros((12, 12))
+        for i in range(4):
+            for j in range(3):
+                for k in range(4):
+                    if k==i:
+                        self.N1212[3*i+j, 3*k+j] = 3.0/4.0
+                    else:
+                        self.N1212[3*i+j, 3*k+j] = -1.0/4.0
         self.nMoving = self.num_vertices - self.nFixed
         self.initial_ARAP_shape_list = []
         for i in range(self.num_vertices):
@@ -102,9 +114,10 @@ class C_SRS_fixedEnd:
                 neighbour_idx = neighbour_list[j]
                 ARAP_shape[j] = self.vertices[neighbour_idx] - self.vertices[i]
             self.initial_ARAP_shape_list.append(ARAP_shape)
+        self.initial_ghost_shape_list = self.get_ghost_shape(self.vertices, self.get_pp_location_bary(self.vertices))
         print("initial_ARAP_shape_list length: ", len(self.initial_ARAP_shape_list))
         print("number of moving vertices: ", self.nMoving)
-        self.initial_cable_vec = self.get_cable_vec(self.vertices)
+        self.initial_cable_vec = self.get_cable_vec_bary(self.vertices)
         self.assemble_CG_matrices()
         self.load_ws()
         self.ikModel = IK_MLP()
@@ -114,14 +127,15 @@ class C_SRS_fixedEnd:
         mem_block   = 9  * self.num_triangles
         bend_block  = 3 * len(self.bending_ele_idx)
         cable_block = 3  * self.nCable
-        matA_size = mem_block + bend_block + cable_block
+        ghost_block = 12 * self.nCable
+        matA_size = mem_block + bend_block + cable_block + ghost_block
         max_weight = np.max((np.max(self.mem_weight_list), np.max(self.bending_weight_list)))
-
-        self.weight_cable = 10 * max_weight
+        self.weight_cable = 1 * max_weight
+        self.weight_ghost = 5 * max_weight
         self.nNeighbour_list = []
         for i in range(self.num_vertices):
             self.nNeighbour_list.append(len(self.neighbour_list[i]))
-        self.matA_initial = np.zeros((matA_size, 3*self.num_vertices))
+        self.matA_initial = np.zeros((matA_size, 3*self.num_vertices + 3*self.nCable))
         print("matA_size: ", matA_size)
         self.vecB_2_add = np.zeros((matA_size, ))
 
@@ -150,23 +164,37 @@ class C_SRS_fixedEnd:
                     self.matA_initial[mem_block + 3*i + k, 3*v_idx+k] = bending_weight * c
 
         for i in range(self.nCable):
-            idx_pp = self.pp_idx[i]
             for k in range(3):
-                self.matA_initial[mem_block + bend_block + 3*i+k, 3*idx_pp+k] += self.weight_cable
-        self.matA_all = np.zeros((matA_size, 3*self.nMoving))
+                self.matA_initial[mem_block + bend_block + 3*i + k, 3*self.num_vertices+3*i+k] = self.weight_cable
+
+        for i in range(self.nCable):
+            row_start = mem_block + bend_block + cable_block + 12*i
+            tri_idx = self.pp_bary_tri_idx[i]
+            tri = self.mesh_triangles[tri_idx]
+            idx_all = [tri[0], tri[1], tri[2], self.num_vertices + i]
+            for j in range(4):
+                idxj = idx_all[j]
+                for k in range(4):
+                    idxk = idx_all[k]
+                    self.matA_initial[row_start + 3*j:row_start+3*j+3, 3*idxk:3*idxk+3] += self.weight_ghost * self.N1212[3*j:3*j+3, 3*k:3*k+3]
+
+        self.matA_all = np.zeros((matA_size, 3*self.nMoving + 3*self.nCable))
         for i in range(self.num_vertices):
             idx_moving = self.idxAll_2_idxMoving[i]
             if idx_moving != -1:
                 self.matA_all[:, 3*idx_moving:3*idx_moving+3] = self.matA_initial[:, 3*i:3*i+3]
             else:
                 self.vecB_2_add -= self.matA_initial[:, 3*i:3*i+3] @ self.vertices[i]
+
+        self.matA_all[:, 3*self.nMoving:] = self.matA_initial[:, 3*self.num_vertices:]
+
         print("matA_all shape: ", self.matA_all.shape)
         print("matA_all rank: ", np.linalg.matrix_rank(self.matA_all))
         self.matAT = self.matA_all.T
         self.matATA = self.matA_all.T @ self.matA_all
         self.matATA_inv_AT = np.linalg.inv(self.matATA) @ self.matAT
         self.matATA_inv = np.linalg.inv(self.matATA)
-        self.K_CG = self.matATA_inv_AT[:, -3*self.nCable:]
+        self.K_CG = self.matATA_inv_AT[:, -15*self.nCable:-12*self.nCable]
 
     def get_ARAP_shape_list(self, vertices):
         ARAP_shape_list = self.initial_ARAP_shape_list.copy()
@@ -191,6 +219,8 @@ class C_SRS_fixedEnd:
             cur_tri = vertices[tri]
             cur_tri_sk = self.N33 @ cur_tri
             u, s, vh = np.linalg.svd(cur_tri_sk.T @ initial_tri_sk)
+            if np.linalg.det(u @ vh) < 0:
+                u[:, -1] *= -1
             R = u @ vh
             R_list[i] = R
         return R_list
@@ -206,7 +236,7 @@ class C_SRS_fixedEnd:
         return R_list
 
     def get_rotation_cable(self, vertices):
-        cur_cable_vec = self.get_cable_vec(vertices)
+        cur_cable_vec = self.get_cable_vec_bary(vertices)
         R_list = [np.eye(3) for _ in range(self.nCable)]
         # find the R matrix that rotates the initial cable vec to the current cable vec, with rotation axis perpendicular to both vecs
         for i in range(self.nCable):
@@ -228,10 +258,50 @@ class C_SRS_fixedEnd:
             R_list[i] = R
         return R_list
 
-    def get_Bvec_CG(self, R_list_tri, R_list_cable, tar_cable_length):
+    def get_rotation_ghost(self, vertices, ghost_vertices):
+        R_list = [np.eye(3) for _ in range(self.nCable)]
+        cur_ghost_shapes = self.get_ghost_shape(vertices, ghost_vertices)
+        for i in range(self.nCable):
+            initial_ghost_shape = self.initial_ghost_shape_list[i]
+            cur_ghost_shape = cur_ghost_shapes[i]
+            u, s, vh = np.linalg.svd(cur_ghost_shape.T @ initial_ghost_shape)
+            if np.linalg.det(u @ vh) < 0:
+                u[:, -1] *= -1
+            R = u @ vh
+            R_list[i] = R
+        return R_list
+
+    def get_rotation_cable_ghost(self, ghost_vertices):
+        cur_cable_vec = []
+        R_list = []
+        for i in range(self.nCable): # cable vec pointing from pulley location to ghost vertex
+            cur_cable_vec.append(ghost_vertices[i] - self.pulley_location[i])
+            cur_cable_vec[i] /= np.linalg.norm(cur_cable_vec[i])
+            initial_cable_vec = self.initial_cable_vec[i]
+            if np.linalg.norm(cur_cable_vec[i]) < 1e-6 or np.linalg.norm(initial_cable_vec) < 1e-6:
+                R_list.append(np.eye(3))
+                continue
+            rotation_axis = np.cross(initial_cable_vec, cur_cable_vec[i])
+            if np.linalg.norm(rotation_axis) < 1e-6:
+                R_list.append(np.eye(3))
+                continue
+            rotation_axis = rotation_axis / np.linalg.norm(rotation_axis)
+            angle = np.arccos(np.clip(np.dot(initial_cable_vec, cur_cable_vec[i]), -1.0, 1.0))
+            K = np.array([[ 0,                   -rotation_axis[2],  rotation_axis[1]],
+                          [ rotation_axis[2],     0,                 -rotation_axis[0]],
+                          [-rotation_axis[1],     rotation_axis[0],   0              ]])
+            R = np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * K @ K
+            R_list.append(R)
+        return R_list
+
+    def get_Bvec_CG(self,vertices, ghost_vertices, R_list_tri, R_list_cable, tar_cable_length):
         matA_shape = self.matA_all.shape[0]
         bVec = np.zeros((matA_shape, ))
-        cur_row = 0
+        ghost_R_list = self.get_rotation_ghost(vertices, ghost_vertices)
+        # check if ghost_R_list is identity
+        # for i in range(self.nCable):
+        #     if not np.allclose(ghost_R_list[i], np.eye(3)):
+        #         print("ghost_R_list[{}] is not identity: \n{}".format(i, ghost_R_list[i]))
         for i in range(self.num_triangles):
             initial_tri_sk = self.initial_tri_SK_list[i]
             R_tri = R_list_tri[i]
@@ -242,39 +312,48 @@ class C_SRS_fixedEnd:
 
         # print("bvec shape: ", bVec.shape)
         for i in range(self.nCable):
-            idx_pp = self.pp_idx[i]
-            idx_pp_moving = self.idxAll_2_idxMoving[idx_pp]
             R_cable = R_list_cable[i]
             initial_cable_vec = self.initial_cable_vec[i]
             vec_rotated = R_cable @ initial_cable_vec
             for k in range(3):
-                bVec[self.matA_all.shape[0] - 3*self.nCable + 3*i+k] += self.weight_cable * (vec_rotated[k] * tar_cable_length[i] + self.pulley_location[i, k])
+                bVec[matA_shape - 15*self.nCable + 3*i+k] += self.weight_cable * (vec_rotated[k] * tar_cable_length[i] + self.pulley_location[i, k])
         
+        for i in range(self.nCable):
+            R_ghost = ghost_R_list[i]
+            initial_ghost_shape = self.initial_ghost_shape_list[i]
+            rotated_ghost_shape = (R_ghost @ initial_ghost_shape.T).T
+            for j in range(4):
+                idx_row_start = matA_shape - 12*self.nCable + 12*i + 3*j
+                for k in range(3):
+                    bVec[idx_row_start+k] += self.weight_ghost * rotated_ghost_shape[j, k]
         return bVec
     
-    def get_CG_Jacobian(self, vertices):
+    def get_CG_Jacobian(self, vertices, ghost_vertices=None):
         if vertices.shape[0] != self.num_vertices:
             vertices = self.q_to_vertices(vertices)
-        R_cable_list = self.get_rotation_cable(vertices)
+        if ghost_vertices is None:
+            ghost_vertices = self.get_pp_location_bary(vertices)
+        R_cable_list = self.get_rotation_cable_ghost(ghost_vertices)
         Bmat = np.zeros((3*self.nCable, self.nCable))
         for i in range(self.nCable):
             cable_vec_rotated = R_cable_list[i] @ self.initial_cable_vec[i]
             for k in range(3):
                 Bmat[3*i+k, i] = self.weight_cable * cable_vec_rotated[k]
         J = self.K_CG @ Bmat
-        # print("CG Jacobian shape: ", J.shape)
         return J
         
-
     def deform_CG(self, tar_cable_length, starting_vertices, max_iter = 300, tol = 1e-8):
         cur_vertices = starting_vertices.copy()
         cur_q = self.vertices_to_q(starting_vertices)
         q_last = cur_q.copy()
+        ghost_vertices = self.get_pp_location_bary(cur_vertices)
         for i in range(max_iter):
-            R_list_cable = self.get_rotation_cable(cur_vertices)
+            R_list_cable = self.get_rotation_cable_ghost(ghost_vertices)
             R_list_tri = self.get_rotation_tri(cur_vertices)
-            bVec = self.get_Bvec_CG(R_list_tri, R_list_cable, tar_cable_length)
-            cur_q_moving = self.matATA_inv_AT @ (bVec + self.vecB_2_add)
+            bVec = self.get_Bvec_CG(cur_vertices, ghost_vertices, R_list_tri, R_list_cable, tar_cable_length)
+            cur_q_all = self.matATA_inv_AT @ (bVec + self.vecB_2_add)
+            cur_q_moving = cur_q_all[:3*self.nMoving]
+            ghost_vertices = cur_q_all[3*self.nMoving:].reshape((self.nCable, 3))
             cur_q = self.q_moving_to_q(cur_q_moving)
             cur_vertices = self.q_to_vertices(cur_q)
             diff = np.linalg.norm(cur_q - q_last)/(3*self.num_vertices)
@@ -298,7 +377,6 @@ class C_SRS_fixedEnd:
         phi_Qfree = np.zeros((self.nCable, 1))
         H_free = np.zeros((self.nCable, 3*self.num_vertices))
         Q_list = [Q_a.copy()]
-        starting_cable_length = self.get_cable_length(starting_vertices)
         diff_count = 0
         t_start = time.time()
         while t_a < total_time:
@@ -321,14 +399,10 @@ class C_SRS_fixedEnd:
             dv_free = lu_solve((lu, piv), b_vec)
 
             Q_free = Q_a + h * Q_ad + h * dv_free
+            cl_free = self.get_cable_length_bary(Q_free)
+            H_free = -self.get_cable_Jacobian_bary(Q_free)
             for i in range(self.nCable):
-                idx_pp = self.pp_idx[i]
-                unit_vec = (self.pulley_location[i,:] - Q_free[3*idx_pp:(3*idx_pp+3)].reshape((3,)))
-                unit_vec = unit_vec / np.linalg.norm(unit_vec)
-                # print("unit_vec: ", unit_vec)
-                phi_Qfree[i] = target_cable_length[i] - np.linalg.norm(self.pulley_location[i] - Q_free[3*idx_pp:3*idx_pp+3].reshape((3,)))
-                # print("phi_Qfree[{}]: {}".format(i, phi_Qfree[i]))
-                H_free[i, 3*idx_pp:3*idx_pp+3] = unit_vec
+                phi_Qfree[i] = target_cable_length[i] - cl_free[i]
             Z1 = lu_solve((lu, piv), H_free.T)                   # (3n, nCable)
             # lcp_Mmat = h * H_free @ self.W_mat @ A_inv @ H_free.T
             lcp_Mmat = h * H_free @ self.W_mat @ Z1
@@ -359,31 +433,6 @@ class C_SRS_fixedEnd:
         print(f"Total simulation time: {t_end - t_start:.2f}s")
         vert_length = self.q_to_vertices(Q_a)
         return Q_list, vert_length, cable_tension
-
-    # def FKD_static(self, target_cable_length, starting_vertices,max_iter = 100, tol = 1e-5):
-    #     if starting_vertices.shape[0] == 3*self.num_vertices:
-    #         Q_a = starting_vertices.copy()
-    #     elif starting_vertices.shape[0] == self.num_vertices:
-    #         Q_a = self.vertices_to_q(starting_vertices)
-    #     else:
-    #         raise ValueError("starting_vertices should be either a 3n vector or an n by 3 array.")
-    #     pass
-    #     Q_a = Q_a.reshape((3*self.num_vertices, ))
-
-    #     phi_Qfree = np.zeros((self.nCable, 1))
-    #     H_free = np.zeros((self.nCable, 3*self.num_vertices))
-    #     Q_list = [Q_a.copy()]
-    #     for num_iter in range(max_iter):
-    #         Q_a_last = Q_a.copy()
-    #         R_list, R_list_1818 = self.get_R_list(self.q_to_vertices(Q_a))
-    #         K_mat, f0 = self.assemble_K(R_list_1818)
-    #         Q_free = solve_with_known_values(K_mat, f0+self.gravity_vec, self.idxAll_2_idxMoving, self.idxMoving_2_idxAll)
-    #         for i in range(self.nCable):
-    #             idx_pp = self.pp_idx[i]
-    #             unit_vec = (self.pulley_location[i,:] - Q_free[3*idx_pp:(3*idx_pp+3)].reshape((3,)))
-    #             unit_vec = unit_vec / np.linalg.norm(unit_vec)
-    #             phi_Qfree[i] = target_cable_length[i] - np.linalg.norm(self.pulley_location[i] - Q_free[3*idx_pp:3*idx_pp+3].reshape((3,)))
-    #             H_free[i, 3*idx_pp:3*idx_pp+3] = unit_vec
             
 
     def IKD_single(self, target_ee_pos, starting_vertices, AA = False, tol = 1e-3):
@@ -413,7 +462,7 @@ class C_SRS_fixedEnd:
         
         def get_jacobian_fd(Q_a, eps = 1e-4):
             Jac = np.zeros((self.nCable, ))
-            cur_cl = self.get_cable_length(Q_a)
+            cur_cl = self.get_cable_length_bary(Q_a)
             for i in range(self.nCable):
                 cl_plus = cur_cl.copy()
                 cl_minus = cur_cl.copy()
@@ -430,7 +479,7 @@ class C_SRS_fixedEnd:
         
         def get_jacobian_fd_cg(Q_a, eps = 1e-4):
             Jac = np.zeros((self.nCable, ))
-            cur_cl = self.get_cable_length(Q_a)
+            cur_cl = self.get_cable_length_bary(Q_a)
             for i in range(self.nCable):
                 cl_plus = cur_cl.copy()
                 cl_minus = cur_cl.copy()
@@ -438,8 +487,8 @@ class C_SRS_fixedEnd:
                 cl_minus[i] -= eps
                 vert_plus = self.deform_CG(cl_plus, self.q_to_vertices(Q_a))
                 vert_minus = self.deform_CG(cl_minus, self.q_to_vertices(Q_a))
-                cl_plus = self.get_cable_length(self.vertices_to_q(vert_plus))
-                cl_minus = self.get_cable_length(self.vertices_to_q(vert_minus))
+                cl_plus = self.get_cable_length_bary(self.vertices_to_q(vert_plus))
+                cl_minus = self.get_cable_length_bary(self.vertices_to_q(vert_minus))
                 cl_diff = cl_plus[i] - cl_minus[i]
                 ee_pos_plus = self.get_ee_pos(self.vertices_to_q(vert_plus))
                 ee_pos_minus = self.get_ee_pos(self.vertices_to_q(vert_minus))
@@ -449,7 +498,7 @@ class C_SRS_fixedEnd:
             return Jac
 
 
-        cur_length = self.get_cable_length(Q)
+        cur_length = self.get_cable_length_bary(Q)
         Q_list, starting_vertices, cable_tension = self.FKD_time(cur_length, 1, starting_vertices)
         Q = self.vertices_to_q(starting_vertices)
         Q_list_final = [Q.copy()]
@@ -458,7 +507,7 @@ class C_SRS_fixedEnd:
             jac = get_jacobian(Q)
             # jac = get_jacobian_fd(Q)
             diff = get_diff(Q)
-            cur_length = self.get_cable_length(Q)
+            cur_length = self.get_cable_length_bary(Q)
             cmd_diff = [0 for _ in range(self.nCable)]
             cmd_length = cur_length.copy()
             # alpha = 10
@@ -499,7 +548,7 @@ class C_SRS_fixedEnd:
             if diff < tol:
                 print("Converged at iteration {} with diff {}".format(i, diff))
                 break
-            cur_length = self.get_cable_length(Q)
+            cur_length = self.get_cable_length_bary(Q)
         return cur_length, starting_vertices, Q_list_final
 
     def generate_ws(self, cable_length_ranges, total_number = 1000, saveFile = 'training_data_1.pkl'):
@@ -513,7 +562,7 @@ class C_SRS_fixedEnd:
         for i in range(len(cl_to_test)):
             cl = cl_to_test[i]
             Q_list, vert_length, cable_tension = self.FKD_time(cl, 1, self.vertices)
-            fcl = self.get_cable_length(vert_length)
+            fcl = self.get_cable_length_bary(vert_length)
             ee_pos = self.get_ee_pos(vert_length)
             print("Test {}: cable length {}, ee pos {}".format(i, np.round(fcl, 3), np.round(ee_pos, 3)))
             # save the data for training
@@ -526,72 +575,6 @@ class C_SRS_fixedEnd:
             data_list.append(data)
         with open(saveFile, 'wb') as f:
             pickle.dump(data_list, f)
-
-    # def IKD_single_AA(self, target_ee_pos, starting_vertices, tol = 1e-3):
-    #     # add anderson acceleration to IKD_single
-    #     idx_ee = self.ee_idx[0]
-    #     idx_ee_moving = self.idxAll_2_idxMoving[idx_ee]
-    #     max_iter = 100
-    #     AA_memory = 5
-    #     aa_cl_list = np.zeros((AA_memory, self.nCable))
-    #     aa_diff_list = np.zeros((AA_memory, ))
-        
-    #     if starting_vertices.shape[0] == 3*self.num_vertices:
-    #         Q = starting_vertices.copy()
-    #     elif starting_vertices.shape[0] == self.num_vertices:
-    #         Q = self.vertices_to_q(starting_vertices)
-    #     def get_diff(Q):
-    #         ee_pos = self.get_ee_pos(Q)
-    #         diff = 1/2 * np.linalg.norm(ee_pos - target_ee_pos) ** 2
-    #         return diff
-    #     def get_jacobian(Q_a):
-    #         J_Moving = self.get_CG_Jacobian(self.q_to_vertices(Q_a))
-    #         Jac = np.zeros((self.nCable, ))
-    #         for i in range(self.nCable):
-    #             ee_pos = self.get_ee_pos(Q_a)
-    #             for j in range(3):
-    #                 Jac[i] += J_Moving[3*idx_ee_moving+j, i] * (ee_pos[j] - target_ee_pos[j])
-    #         return Jac
-    #     cur_length = self.get_cable_length(Q)
-    #     Q_list, starting_vertices, cable_tension = self.FKD_time(cur_length, 1, starting_vertices)
-    #     Q = self.vertices_to_q(starting_vertices)
-        
-    #     for i in range(max_iter):
-    #         dl = 1
-    #         jac = get_jacobian(Q)
-    #         cur_length = self.get_cable_length(Q)
-    #         cmd_diff = [0 for _ in range(self.nCable)]
-    #         cmd_length = cur_length.copy()
-    #         for k in range(self.nCable):
-    #             if cable_tension[k] > 1e-5: # only update if the cable is taut
-    #                 cmd_diff[k] = -dl * jac[k]
-    #             else:
-    #                 cmd_diff[k] = 0
-    #         cmd_diff = clamp_diff(cmd_diff, min_diff = 5e-4)
-    #         for k in range(self.nCable):
-    #             cmd_length[k] += cmd_diff[k]
-    #         Q_list, starting_vertices, cable_tension = self.FKD_time(cmd_length, 1, Q)
-    #         Q = self.vertices_to_q(starting_vertices)
-    #         diff = get_diff(Q)
-    #         aa_cl_list[i%AA_memory] = cmd_length.copy()
-    #         aa_diff_list[i%AA_memory] = diff
-    #         if i > 0 and i%AA_memory == 0:
-    #             print("Performing Anderson Acceleration at iteration {}".format(i))
-    #             # cl_cmd_next = anderson_step(aa_cl_list, aa_diff_list, beta=1, lam=1e-8, m=AA_memory-1)
-    #             cl_cmd_next = my_aa(aa_cl_list, aa_diff_list)
-    #             aa_cl_list = np.zeros((AA_memory, self.nCable))
-    #             aa_diff_list = np.zeros((AA_memory, ))
-    #             Q_list, starting_vertices, cable_tension = self.FKD_time(cl_cmd_next, 1, Q)
-    #             Q = self.vertices_to_q(starting_vertices)
-    #         diff = get_diff(Q)
-    #         diff = np.sqrt(2*diff)
-    #         print("Iteration {}: diff = {}, cmd_diff = {}".format(i, diff, np.round(cmd_diff, 5)))
-    #         if diff < tol:
-    #             print("Converged at iteration {} with diff {}".format(i, diff))
-    #             break
-    #         cur_length = self.get_cable_length(Q)
-    #     return cur_length, starting_vertices
-
 
     def IK_CG(self, target_ee_pos, starting_vertices, tol = 1e-5):
         idx_ee = self.ee_idx[0]
@@ -617,7 +600,7 @@ class C_SRS_fixedEnd:
             dl = 1
             jac = get_jacobian(Q)
             diff = get_diff(Q)
-            cur_length = self.get_cable_length(Q)
+            cur_length = self.get_cable_length_bary(Q)
             cmd_diff = [0 for _ in range(self.nCable)]
             cmd_length = cur_length.copy()
             for k in range(self.nCable):
@@ -731,6 +714,21 @@ class C_SRS_fixedEnd:
         ee_pos = vertices[ee_id]
         return ee_pos
 
+    def get_ghost_shape(self, vertices, ghost_vertices):
+        if vertices.shape[0] != self.num_vertices:
+            vertices = self.q_to_vertices(vertices)
+        ghost_shape_list = []
+        for i in range(self.nCable):
+            pp_tri = self.pp_bary_tri_idx[i]
+            tri = self.mesh_triangles[pp_tri]
+            ghost_shape = np.zeros((4,3))
+            for j in range(3):
+                v_idx = tri[j]
+                ghost_shape[j] = vertices[v_idx]
+            ghost_shape[3] = ghost_vertices[i]
+            ghost_shape_list.append(self.N44 @ ghost_shape)
+        return ghost_shape_list
+
     def assemble_K(self, R_list_1818):
         Ke_list = [np.zeros((18,18)) for _ in range(self.num_RF_triangles)]
         Ke0_list = [np.zeros((18,18)) for _ in range(self.num_RF_triangles)]
@@ -806,6 +804,12 @@ class C_SRS_fixedEnd:
             cable_length[i] = np.linalg.norm(pulley_location - pp_vertex)
         return cable_length
     
+    def get_cable_length_bary(self, vertices):
+        if vertices.shape[0] != self.num_vertices:
+            vertices = self.q_to_vertices(vertices)
+        pp_locations = self.get_pp_location_bary(vertices)
+        return [np.linalg.norm(self.pulley_location[i] - pp_locations[i]) for i in range(self.nCable)]
+
     def get_cable_vec(self, vertices): # cable vec point from the pulley to the pull point, normalized
         if vertices.shape[0] != self.num_vertices:
             vertices = self.q_to_vertices(vertices)
@@ -817,18 +821,80 @@ class C_SRS_fixedEnd:
             cable_vec[i] = vec / np.linalg.norm(vec)
         return cable_vec
 
+    def get_cable_vec_bary(self, vertices): # cable vec point from the pulley to the pull point, normalized
+        if vertices.shape[0] != self.num_vertices:
+            vertices = self.q_to_vertices(vertices)
+        pp_locations = self.get_pp_location_bary(vertices)
+        cable_vec = np.zeros((self.nCable, 3))
+        for i in range(self.nCable):
+            pulley_location = self.pulley_location[i]
+            vec = pp_locations[i] - pulley_location
+            cable_vec[i] = vec / np.linalg.norm(vec)
+        return cable_vec
+
+    def get_pp_location_bary(self, vertices):
+        """Compute pull-point world positions from barycentric coords + normal offset."""
+        if vertices.shape[0] != self.num_vertices:
+            vertices = self.q_to_vertices(vertices)
+        pp_location = np.zeros((self.nCable, 3))
+        for i in range(self.nCable):
+            idx_tri = self.description['pp_bary_tri_idx'][i]
+            bary    = self.description['pp_bary_coords'][i]
+            offset  = self.description['pp_bary_offsets'][i]
+            tri     = self.mesh_triangles[idx_tri]
+            pp_on_surface = bary @ vertices[tri]
+            n = get_normal(vertices[tri])
+            pp_location[i] = pp_on_surface + offset * n
+        return pp_location
+
+    def get_cable_Jacobian_bary(self, vertices):
+        """
+        (nCable, nVertices*3) Jacobian of cable lengths w.r.t. all vertex DOFs,
+        for the barycentric+offset pull-point representation.
+
+        Each column block (3 cols for vertex k) is:
+            u_hat @ (bary_k * I  +  offset * d(t3)/d(v_k))
+        where d(t3)/d(v_k) = P @ Gn_k / (2*area),  P = I - t3 t3^T.
+        """
+        if vertices.shape[0] != self.num_vertices:
+            vertices = self.q_to_vertices(vertices)
+        cable_Jacobian = np.zeros((self.nCable, self.num_vertices * 3))
+        pp_locations = self.get_pp_location_bary(vertices)
+        for i in range(self.nCable):
+            idx_tri = self.description['pp_bary_tri_idx'][i]
+            bary    = self.description['pp_bary_coords'][i]
+            offset  = self.description['pp_bary_offsets'][i]
+            tri     = self.mesh_triangles[idx_tri]
+            v0, v1, v2 = vertices[tri[0]], vertices[tri[1]], vertices[tri[2]]
+            e1, e2 = v1 - v0, v2 - v0
+            n  = np.cross(e1, e2)
+            A2 = np.linalg.norm(n)          # 2 * triangle area
+            t3 = n / A2
+            P  = np.eye(3) - np.outer(t3, t3)
+            # dn/dv_k skew matrices: Gn = (skew(e2-e1), -skew(e2), skew(e1))
+            Gn = (skew(e2 - e1), -skew(e2), skew(e1))
+            vec   = pp_locations[i] - self.pulley_location[i]
+            u_hat = vec / np.linalg.norm(vec)
+            for k in range(3):
+                Gt = (P @ Gn[k]) / A2          # d(t3)/d(v_k), shape (3,3)
+                dpp_dvk = bary[k] * np.eye(3) + offset * Gt
+                col = 3 * tri[k]
+                cable_Jacobian[i, col:col + 3] = u_hat @ dpp_dvk
+        return cable_Jacobian
+
     def visualize_vert(self, vertices):
         mesh = pv.PolyData(vertices, np.hstack((np.full((self.mesh_triangles.shape[0], 1), 3), self.mesh_triangles)))
 
         plotter = pv.Plotter()
         plotter.add_mesh(mesh, color='lightgray', show_edges=True)
-        plotter.add_points(vertices[self.pp_idx], color='blue', point_size=10
+        pp_locations = self.get_pp_location_bary(vertices)
+        plotter.add_points(pp_locations, color='blue', point_size=10
                             , label='Pullpoints')
         plotter.add_points(self.pulley_location, color='blue', point_size=10
                             , label='Pulleys')
         # add lines between pullpoints and pulleys
-        for i in range(len(self.pp_idx)):
-            plotter.add_lines(np.array([vertices[self.pp_idx[i]], self.pulley_location[i]]), color='blue', width=2)
+        for i in range(self.nCable):
+            plotter.add_lines(np.array([pp_locations[i], self.pulley_location[i]]), color='blue', width=2)
         # annotate ee vertices
         plotter.add_points(vertices[self.ee_idx], color='red', point_size=10, label='End Effectors')
 
@@ -845,13 +911,15 @@ class C_SRS_fixedEnd:
 
         plotter = pv.Plotter()
         plotter.add_mesh(mesh, color='lightgray', show_edges=True)
-        plotter.add_points(vertices[self.pp_idx], color='blue', point_size=10
+        pp_locations = self.get_pp_location_bary(vertices)
+        plotter.add_points(pp_locations, color='blue', point_size=10
                             , label='Pullpoints')
         plotter.add_points(self.pulley_location, color='blue', point_size=10
                             , label='Pulleys')
         # add lines between pullpoints and pulleys
-        for i in range(len(self.pp_idx)):
-            plotter.add_lines(np.array([vertices[self.pp_idx[i]], self.pulley_location[i]]), color='blue', width=2)
+        for i in range(self.nCable):
+            plotter.add_lines(np.array([pp_locations[i], self.pulley_location[i]]), color='blue', width=2)
+
         # annotate ee vertices
         plotter.add_points(vertices[self.ee_idx], color='red', point_size=10, label='End Effectors')
 
@@ -872,13 +940,14 @@ class C_SRS_fixedEnd:
 
         plotter = pv.Plotter()
         plotter.add_mesh(mesh, color='lightgray', show_edges=True)
-        plotter.add_points(vertices[self.pp_idx], color='blue', point_size=10
+        pp_locations = self.get_pp_location_bary(vertices)
+        plotter.add_points(pp_locations, color='blue', point_size=10
                             , label='Pullpoints')
         plotter.add_points(self.pulley_location, color='blue', point_size=10
                             , label='Pulleys')
         # add lines between pullpoints and pulleys
-        for i in range(len(self.pp_idx)):
-            plotter.add_lines(np.array([vertices[self.pp_idx[i]], self.pulley_location[i]]), color='blue', width=2)
+        for i in range(self.nCable):
+            plotter.add_lines(np.array([pp_locations[i], self.pulley_location[i]]), color='blue', width=2)
         # annotate ee vertices
         plotter.add_points(vertices[self.ee_idx], color='red', point_size=10, label='End Effectors')
         # add all points in ws_pts as cyan points
@@ -897,13 +966,14 @@ class C_SRS_fixedEnd:
         ws_pts = np.array(self.ee_pos_list)
         plotter = pv.Plotter()
         plotter.add_mesh(mesh, color='lightgray', show_edges=True)
-        plotter.add_points(vertices[self.pp_idx], color='blue', point_size=10
+        pp_locations = self.get_pp_location_bary(vertices)
+        plotter.add_points(pp_locations, color='blue', point_size=10
                             , label='Pullpoints')
         plotter.add_points(self.pulley_location, color='blue', point_size=10
                             , label='Pulleys')
         # add lines between pullpoints and pulleys
-        for i in range(len(self.pp_idx)):
-            plotter.add_lines(np.array([vertices[self.pp_idx[i]], self.pulley_location[i]]), color='blue', width=2)
+        for i in range(self.nCable):
+            plotter.add_lines(np.array([pp_locations[i], self.pulley_location[i]]), color='blue', width=2)
         # annotate ee vertices
         plotter.add_points(vertices[self.ee_idx], color='red', point_size=10, label='End Effectors')
         # add all points in ws_pts as cyan points
@@ -1010,7 +1080,9 @@ class C_SRS_fixedEnd:
         surf = pv.PolyData(vertices0.copy(), faces)
         plotter.add_mesh(surf, color='lightgray', show_edges=True)
 
-        pp_cloud = pv.PolyData(vertices0[self.pp_idx].copy())
+        # pp_cloud = pv.PolyData(vertices0[self.pp_idx].copy())
+        pp_locations = self.get_pp_location_bary(vertices0)
+        pp_cloud = pv.PolyData(pp_locations)
         plotter.add_mesh(pp_cloud, color='blue', point_size=10,
                          render_points_as_spheres=True, label='Pull points')
 
@@ -1033,7 +1105,7 @@ class C_SRS_fixedEnd:
         # All cable segments in a single PolyData so points update in-place
         cable_pts = np.empty((2 * self.nCable, 3))
         for i in range(self.nCable):
-            cable_pts[2 * i]     = vertices0[self.pp_idx[i]]
+            cable_pts[2 * i]     = pp_locations[i]
             cable_pts[2 * i + 1] = self.pulley_location[i]
         cable_lines = np.array([[2, 2 * i, 2 * i + 1]
                                  for i in range(self.nCable)]).flatten()
@@ -1050,11 +1122,12 @@ class C_SRS_fixedEnd:
         for Q in Q_list:
             vertices = _to_vertices(Q)
             surf.points = vertices.copy()
-            pp_cloud.points = vertices[self.pp_idx].copy()
+            pp_locations = self.get_pp_location_bary(vertices)
+            pp_cloud.points = pp_locations
             ee_cloud.points = vertices[self.ee_idx].copy()
             fixed_cloud.points = vertices[self.fixed_idx].copy()
             for i in range(self.nCable):
-                cable_pts[2 * i] = vertices[self.pp_idx[i]]
+                cable_pts[2 * i] = pp_locations[i]
             cables.points = cable_pts.copy()
             plotter.write_frame()
 
@@ -1086,7 +1159,7 @@ class IK_MLP(nn.Module):
         return scaler_Y.inverse_transform(y_norm).flatten()
 
 if __name__ == "__main__":
-    description_file = "./models/flat_tri_surface/C_SRS_description.pkl"
+    description_file = "./models/flat_tri_surface/C_SRS_description_bary.pkl"
     c_srs = C_SRS_fixedEnd(description_file)
     icl = c_srs.initial_cable_length.copy()
     # cl_range_1 = [[icl[0]-0.08, icl[0]-0.02], 
@@ -1107,8 +1180,8 @@ if __name__ == "__main__":
     # exit(0)
     tcl = [icl[0]-0.02, icl[1]-0.02, icl[2]-0.02, icl[3], icl[4], icl[5]]
     Q_list, vert_length, cable_tension = c_srs.FKD_time(tcl, 1, c_srs.vertices, tol = 1e-4, show_info = True)
-    fcl = c_srs.get_cable_length(vert_length)
-    vert_cg = c_srs.deform_CG(fcl, c_srs.vertices)
+    fcl = c_srs.get_cable_length_bary(vert_length)
+    vert_cg = c_srs.deform_CG(fcl, c_srs.vertices, max_iter=1000, tol=1e-9)
     # print("cable tension: ", cable_tension)
     c_srs.visualize_vert(vert_length)
     c_srs.visualize_vert(vert_cg)

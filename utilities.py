@@ -638,6 +638,21 @@ def generate_rectangular_traj(wayPoints, n_interp):
             traj.append(interp_point)
     return traj
 
+def skew(a):
+    """Return the 3x3 skew-symmetric matrix of vector a, so that skew(a)@b == cross(a,b)."""
+    return np.array([[ 0,    -a[2],  a[1]],
+                     [ a[2],  0,    -a[0]],
+                     [-a[1],  a[0],  0   ]])
+
+
+def get_normal(tri):
+    """Return the unit normal of a triangle. tri: (3,3) rows are vertex positions."""
+    e1 = tri[1] - tri[0]
+    e2 = tri[2] - tri[0]
+    n = np.cross(e1, e2)
+    return n / np.linalg.norm(n)
+
+
 def clamp_diff(cmd_diff, min_bound = 5e-4, max_bound = 1e-2):
     # max_diff = np.max(np.abs(cmd_diff))
     min_diff = 0

@@ -15,7 +15,7 @@ density = 961 # kg/m^3
 
 folder = "./models/flat_tri_surface/"
 
-pullpoint_locations = np.array([[215, 10, 0], [250,80,0], [215, 150, 0], [180, 10, 0], [145, 80, 0], [180, 150,0]]) * 1e-3
+pullpoint_locations = np.array([[215, 10, 2.5], [250,80,2.5], [215, 150, 2.5], [180, 10, -2.5], [145, 80, -2.5], [180, 150,-2.5]]) * 1e-3
 pulley_locations = np.array([[30, 10, 400], [30, 80, 400], [30, 150, 400], [10, 10, -259], [10, 80, -259], [10, 150, -259]]) * 1e-3
 ee_vertices_list = np.array([[270, 80, 0]]) * 1e-3
 
@@ -126,6 +126,24 @@ def mesh_polygon(boundary, pp_locations=None, max_area=None, min_angle=30):
 
     A = {"vertices": all_verts, "segments": segs}
 
+    opts = "p"
+    opts += f"q{min_angle}"
+    if max_area is not None:
+        opts += f"a{max_area}"
+    B = tr.triangulate(A, opts)
+    return np.array(B["vertices"], dtype=float), np.array(B["triangles"], dtype=int)
+
+
+def mesh_polygon_noForce(boundary, max_area=None, min_angle=30):
+    """
+    Constrained Delaunay triangulation of the interior without forcing any
+    interior points as vertices. Use this when pull points will be represented
+    via barycentric coordinates (generate_C_SRS_description_bary) rather than
+    as explicit mesh vertices.
+    """
+    n = len(boundary)
+    segs = np.array([[i, (i + 1) % n] for i in range(n)])
+    A = {"vertices": boundary, "segments": segs}
     opts = "p"
     opts += f"q{min_angle}"
     if max_area is not None:
@@ -398,6 +416,16 @@ def generate_edge_matrix(mesh_vertices, mesh_triangles):
             print("error")
     return edge_list, weight_list
 
+def get_normal(mesh_vertices, mesh_triangles):
+    """Returns (M, 3) array of unit normal vectors, one per triangle."""
+    v0 = mesh_vertices[mesh_triangles[:, 0]]
+    v1 = mesh_vertices[mesh_triangles[:, 1]]
+    v2 = mesh_vertices[mesh_triangles[:, 2]]
+    n = np.cross(v1 - v0, v2 - v0)
+    n /= np.linalg.norm(n, axis=1, keepdims=True)
+    return n
+
+
 def cal_area_list(mesh_vertices, mesh_triangles):
     area_list = []
     for tri in mesh_triangles:
@@ -511,6 +539,153 @@ def generate_L_list(mesh_vertices, mesh_triangles):
         L_list.append(np.sqrt((L0 + L1 + L2) / 3))
     return L_list
 
+def find_triangle_and_bary(mesh_vertices, mesh_triangles, point):
+    """
+    Find the triangle that contains `point` (matched in XY) and return
+    (tri_idx, bary_coords, offset) where:
+      bary_coords : (3,) barycentric weights summing to 1
+      offset      : signed distance along triangle normal from the surface
+                    to the point (0 for flat meshes with z=0)
+    The triangle that minimises the outside-distance is returned, so points
+    exactly on an edge or slightly outside the mesh still produce a sensible
+    result.
+    """
+    point = np.asarray(point, float)
+    best_tri = -1
+    best_bary = None
+    best_outside = np.inf
+
+    for ti, tri in enumerate(mesh_triangles):
+        a = mesh_vertices[tri[0], :2]
+        b = mesh_vertices[tri[1], :2]
+        c = mesh_vertices[tri[2], :2]
+        p = point[:2]
+
+        denom = (b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1])
+        if abs(denom) < 1e-14:
+            continue
+        l0 = ((b[1] - c[1]) * (p[0] - c[0]) + (c[0] - b[0]) * (p[1] - c[1])) / denom
+        l1 = ((c[1] - a[1]) * (p[0] - c[0]) + (a[0] - c[0]) * (p[1] - c[1])) / denom
+        l2 = 1.0 - l0 - l1
+
+        outside = max(0.0, -l0, -l1, -l2)
+        if outside < best_outside:
+            best_outside = outside
+            best_tri = ti
+            best_bary = np.array([l0, l1, l2])
+        if outside == 0.0:
+            break  # exact containment found; mesh is a proper partition
+
+    tri = mesh_triangles[best_tri]
+    v0, v1, v2 = mesh_vertices[tri[0]], mesh_vertices[tri[1]], mesh_vertices[tri[2]]
+    projected = best_bary[0] * v0 + best_bary[1] * v1 + best_bary[2] * v2
+    normal = np.cross(v1 - v0, v2 - v0)
+    nn = np.linalg.norm(normal)
+    offset = float(np.dot(point - projected, normal / nn)) if nn > 1e-14 else 0.0
+
+    return best_tri, best_bary, offset
+
+
+def generate_C_SRS_description_bary(mesh_vertices, mesh_triangles, pullpoint_locations, pulley_locations, ee_vertices_list, density, thickness, Youngs_modulus, Poisson_ratio):
+    """
+    Generates the C-SRS description using barycentric coordinates + surface-normal
+    offset to represent cable pull points, instead of forcing extra vertices at
+    those locations.
+
+    The mesh is used as-is (no vertices are inserted at pull-point positions).
+    Each pull point is stored as (tri_idx, bary_coords, offset) so the simulation
+    can interpolate the pull-point position from the three triangle vertices.
+
+    Saves to C_SRS_description_bary.pkl.
+    """
+    k_m = Youngs_modulus * thickness / (1 - Poisson_ratio ** 2)
+    k_b = Youngs_modulus * thickness ** 3 / (12 * (1 - Poisson_ratio ** 2))
+
+    pp_bary_tri_idx = []
+    pp_bary_coords = []
+    pp_bary_offsets = []
+    for i, pp in enumerate(pullpoint_locations):
+        tri_idx, bary, offset = find_triangle_and_bary(mesh_vertices, mesh_triangles, pp)
+        pp_bary_tri_idx.append(tri_idx)
+        pp_bary_coords.append(bary)
+        pp_bary_offsets.append(offset)
+        print(f"Pullpoint {i}: triangle {tri_idx}, bary {np.round(bary, 4)}, offset {offset:.4e}")
+    
+    mesh_RF_triangles_updated = build_RF_matrix(mesh_triangles)
+
+    ee_idx = []
+    for i in range(len(ee_vertices_list)):
+        dists = np.linalg.norm(mesh_vertices[:, :2] - ee_vertices_list[i, :2], axis=1)
+        idx = int(np.argmin(dists))
+        mesh_vertices[idx] = ee_vertices_list[i]
+        ee_idx.append(idx)
+    print("ee_idx:", ee_idx)
+
+    edge_list, weight_list = generate_edge_matrix(mesh_vertices, mesh_triangles)
+    bending_ele_idx, bending_ele_param, bending_weight_list = build_bending_elements(mesh_vertices, mesh_triangles)
+    bending_weight_list = [k_b * w for w in bending_weight_list]
+
+    neighbour_list, neighbour_edge_list = generate_neighbour_list(mesh_triangles, len(mesh_vertices), edge_list)
+    area_list = cal_area_list(mesh_vertices, mesh_triangles)
+    L_list = generate_L_list(mesh_vertices, mesh_triangles)
+    mem_weight_list = [k_m * area_list[i] / (L_list[i] ** 2) for i in range(len(mesh_triangles))]
+
+    initial_SK_list = get_ARAP_initial_SK_list(mesh_vertices, mesh_triangles, edge_list, weight_list, neighbour_list, neighbour_edge_list)
+    stiffness_matrices = []
+    for tri in mesh_RF_triangles_updated:
+        X = mesh_vertices[tri]
+        stiffness_matrices.append(ebst_stiffness(tri, X, Youngs_modulus, Poisson_ratio, thickness))
+    mass_mat = cal_mass_matrix(mesh_vertices, mesh_triangles, density, thickness)
+
+    # derive visual pull-point positions from barycentric coords for the plotter
+    normal_vectors = get_normal(mesh_vertices, mesh_triangles)
+    pp_bary_positions = np.array([pp_bary_coords[i][0] * mesh_vertices[mesh_triangles[pp_bary_tri_idx[i]][0]] +
+                                   pp_bary_coords[i][1] * mesh_vertices[mesh_triangles[pp_bary_tri_idx[i]][1]] +
+                                   pp_bary_coords[i][2] * mesh_vertices[mesh_triangles[pp_bary_tri_idx[i]][2]]
+                                   for i in range(len(pullpoint_locations))])
+    pp_locations_with_offset = pp_bary_positions + np.array([pp_bary_offsets[i] * normal_vectors[pp_bary_tri_idx[i]] for i in range(len(pullpoint_locations))])
+    mesh = pv.PolyData(mesh_vertices, np.hstack((np.full((mesh_triangles.shape[0], 1), 3), mesh_triangles)))
+    plotter = pv.Plotter()
+    plotter.add_mesh(mesh, color='lightgray', show_edges=True)
+    plotter.add_points(pp_locations_with_offset, color='blue', point_size=10, label='Pullpoints (bary)')
+    plotter.add_points(pulley_locations, color='cyan', point_size=10, label='Pulleys')
+    for i in range(len(pullpoint_locations)):
+        plotter.add_lines(np.array([pp_locations_with_offset[i], pulley_locations[i]]), color='blue', width=2)
+    plotter.add_points(mesh_vertices[ee_idx], color='red', point_size=10, label='EE vertices')
+    plotter.add_legend()
+    plotter.show()
+
+    with open(folder + "C_SRS_description_bary.pkl", "wb") as f:
+        pickle.dump({
+            "mesh_vertices": mesh_vertices,
+            "mesh_triangles": mesh_triangles,
+            "mesh_RF_triangles": mesh_RF_triangles_updated,
+            "edge_list": edge_list,
+            "weight_list": weight_list,
+            "neighbour_list": neighbour_list,
+            "neighbour_edge_list": neighbour_edge_list,
+            "area_list": area_list,
+            "bending_ele_idx": bending_ele_idx,
+            "bending_ele_param": bending_ele_param,
+            "bending_weight_list": bending_weight_list,
+            "mem_weight_list": mem_weight_list,
+            "initial_ARAP_SK_list": initial_SK_list,
+            "stiffness_matrices": stiffness_matrices,
+            "mass_matrix": mass_mat,
+            "pp_bary_tri_idx": np.array(pp_bary_tri_idx, dtype=int),
+            "pp_bary_coords": np.array(pp_bary_coords),
+            "pp_bary_offsets": np.array(pp_bary_offsets),
+            "ee_idx": ee_idx,
+            "pullpoint_locations": pullpoint_locations,
+            "pulley_locations": pulley_locations,
+            "density": density,
+            "thickness": thickness,
+            "Youngs_modulus": Youngs_modulus,
+            "Poisson_ratio": Poisson_ratio,
+        }, f)
+    return
+
+
 def generate_C_SRS_description(mesh_vertices, mesh_triangles, pullpoint_locations, pulley_locations, ee_vertices_list, density, thickness, Youngs_modulus, Poisson_ratio):
     k_m = Youngs_modulus * thickness / (1-Poisson_ratio**2)
     k_b = Youngs_modulus * thickness**3 / (12 * (1-Poisson_ratio**2))
@@ -585,7 +760,8 @@ def generate_C_SRS_description(mesh_vertices, mesh_triangles, pullpoint_location
 
 
 boundary = extract_boundary(DXF_PATH)
-mesh_vertices, mesh_triangles = mesh_polygon(boundary, pp_locations=pullpoint_locations[:, :2] * 1e3, max_area=MAX_AREA, min_angle=30)
+mesh_vertices, mesh_triangles = mesh_polygon_noForce(boundary, max_area=MAX_AREA, min_angle=30)
+
 mesh_RF_triangles = build_RF_matrix(mesh_triangles)
 mesh_vertices = mesh_vertices * 1e-3  # mm → m
 mesh_vertices = np.hstack((mesh_vertices, np.zeros((mesh_vertices.shape[0], 1))))  # add z=0
@@ -595,4 +771,4 @@ print("mesh_triangles shape:", mesh_triangles.shape)
 boundary_vertices = get_boundary_vertex_indices(mesh_triangles)
 print("boundary_vertices:", boundary_vertices)
 
-generate_C_SRS_description(mesh_vertices, mesh_triangles, pullpoint_locations=pullpoint_locations, pulley_locations=pulley_locations, ee_vertices_list=ee_vertices_list, density=density, thickness=thickness, Youngs_modulus=Youngs_modulus, Poisson_ratio=Poisson_ratio)
+generate_C_SRS_description_bary(mesh_vertices, mesh_triangles, pullpoint_locations=pullpoint_locations, pulley_locations=pulley_locations, ee_vertices_list=ee_vertices_list, density=density, thickness=thickness, Youngs_modulus=Youngs_modulus, Poisson_ratio=Poisson_ratio)
