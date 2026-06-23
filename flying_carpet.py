@@ -691,6 +691,6 @@ if __name__ == "__main__":
     # print("Final cable length: ", fcl)
     print("Difference in cable length: ", diff_cl)
 
-    # vert_cg = flying_carpet.deform_CG(fcl, flying_carpet.vertices, max_iter=1000, tol=1e-9)
+    vert_cg = flying_carpet.deform_CG(fcl, flying_carpet.vertices, max_iter=1000, tol=1e-9)
     flying_carpet.visualize_vert(vert_length)
     # flying_carpet.visualize_vert(vert_cg)
