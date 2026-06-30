@@ -130,8 +130,8 @@ class C_SRS_fixedEnd:
         ghost_block = 12 * self.nCable
         matA_size = mem_block + bend_block + cable_block + ghost_block
         max_weight = np.max((np.max(self.mem_weight_list), np.max(self.bending_weight_list)))
-        self.weight_cable = 1 * max_weight
-        self.weight_ghost = 5 * max_weight
+        self.weight_cable = 0.5 * max_weight
+        self.weight_ghost = 0.5 * max_weight
         self.nNeighbour_list = []
         for i in range(self.num_vertices):
             self.nNeighbour_list.append(len(self.neighbour_list[i]))
@@ -782,7 +782,7 @@ class C_SRS_fixedEnd:
     def q_to_q_moving(self, q):
         q_moving = np.zeros((self.nMoving * 3, ))
         for i in range(self.num_vertices):
-            if self.idxAll_2_idxMoving[i] == -1:
+            if self.idxAll_2_idxMoving[i] != -1:
                 idx_moving = i - self.idxAll_2_idxMoving[i] - 1
                 q_moving[3*idx_moving:3*idx_moving+3] = q[3*i:3*i+3]
         return q_moving
@@ -959,6 +959,31 @@ class C_SRS_fixedEnd:
         plotter.show_grid()
         plotter.show_axes()
         plotter.add_legend()
+        plotter.show()
+
+    def visualize_vert_paper(self, vertices):
+        mesh = pv.PolyData(vertices, np.hstack((np.full((self.mesh_triangles.shape[0], 1), 3), self.mesh_triangles)))
+        mesh_original = pv.PolyData(self.vertices, np.hstack((np.full((self.mesh_triangles.shape[0], 1), 3), self.mesh_triangles)))
+        plotter = pv.Plotter()
+        plotter.add_mesh(mesh_original, color='lightgray', show_edges=True, opacity = 0.5, edge_color = 'grey')
+        plotter.add_mesh(mesh, color='lightblue', show_edges=True,opacity = 0.9 , edge_color = 'grey')
+        pp_locations = self.get_pp_location_bary(vertices)
+        
+        plotter.add_points(self.pulley_location, color='blue', point_size=10, label='Pulleys')
+        # add lines between pullpoints and pulleys
+        for i in range(self.nCable):
+            if i == 0 or i == 2 or i == 4:
+                plotter.add_points(pp_locations[i], color='red', point_size=10, label='Pullpoints')
+                # plotter.add_lines(np.array([pp_locations[i], self.pulley_location[i]]), color='green', width=2)
+        # add fixed vertices
+        plotter.add_points(vertices[self.fixed_idx], color='black', point_size=10, label='Fixed Vertices')
+        # annotate ee vertices
+        # plotter.add_points(vertices[self.ee_idx], color='red', point_size=10, label='End Effectors')
+
+        # add grid
+        # plotter.show_grid()
+        # plotter.show_axes()
+        # plotter.add_legend()
         plotter.show()
 
     def visualize_planned_traj(self, vertices, traj):
@@ -1178,13 +1203,13 @@ if __name__ == "__main__":
     # c_srs.generate_ws(cl_range_1, total_number=1000, saveFile='training_data_1.pkl')
     # c_srs.generate_ws(cl_range_2, total_number=1000, saveFile='training_data_2.pkl')
     # exit(0)
-    tcl = [icl[0]-0.02, icl[1]-0.02, icl[2]-0.02, icl[3], icl[4], icl[5]]
+    tcl = [icl[0]+0.1, icl[1]+0.1, icl[2]-0.04, icl[3]+0.1, icl[4]-0.01, icl[5]+0.1]
     Q_list, vert_length, cable_tension = c_srs.FKD_time(tcl, 1, c_srs.vertices, tol = 1e-4, show_info = True)
     fcl = c_srs.get_cable_length_bary(vert_length)
-    vert_cg = c_srs.deform_CG(fcl, c_srs.vertices, max_iter=1000, tol=1e-9)
+    # vert_cg = c_srs.deform_CG(fcl, c_srs.vertices, max_iter=1000, tol=1e-9)
     # print("cable tension: ", cable_tension)
-    c_srs.visualize_vert(vert_length)
-    c_srs.visualize_vert(vert_cg)
+    c_srs.visualize_vert_paper(vert_length)
+    # c_srs.visualize_vert(vert_cg)
     exit(0)
     # cur_length, starting_vertices = c_srs.IKD_single(ee_target,  c_srs.vertices, AA = False, tol = 1e-3)
     # cur_length, starting_vertices = c_srs.IK_CG(ee_target, c_srs.vertices, tol = 1e-3)

@@ -16,8 +16,15 @@ class Flying_carpet:
         self.vertices = self.description['mesh_vertices']
         
         self.mesh_triangles = self.description['mesh_triangles']
+        initial_translation = np.array([280, 380, 300]) * 1e-3
+        self.vertices[:, 0] += initial_translation[0]
+        self.vertices[:, 1] += initial_translation[1]
+        self.vertices[:, 2] += initial_translation[2]
         # check if there are <0 element in mesh_RF_triangles
-        self.pp_idx = self.description['pp_idx']
+        # self.pp_idx = self.description['pp_idx']
+        self.pp_bary_tri_idx = self.description['pp_bary_tri_idx']
+        self.pp_bary_coords = self.description['pp_bary_coords']
+        self.pp_bary_offsets = self.description['pp_bary_offsets']
         self.pulley_location = self.description['pulley_locations']
         self.mesh_RF_triangles = self.description['mesh_RF_triangles']
         self.ee_idx = self.description['ee_idx']
@@ -57,7 +64,7 @@ class Flying_carpet:
         self.N33 = np.eye(3) - 1/3*np.ones((3,3))
         self.initial_tri_SK_list = self.get_tri_SK_list(self.vertices)
         self.nCable = len(self.pulley_location)
-        self.initial_cable_length = self.get_cable_length(self.vertices)
+        self.initial_cable_length = self.get_cable_length_bary(self.vertices)
         self.gravity_dir = np.array([0, 0, -1])
         self.gravity = 9.81
         self.gravity_vec = np.zeros(self.num_vertices * 3)
@@ -78,6 +85,17 @@ class Flying_carpet:
                         self.N1818[3*i+j, 3*k+j] = 5.0/6.0
                     else:
                         self.N1818[3*i+j, 3*k+j] = -1.0/6.0
+        self.N1212 = np.zeros((12, 12))
+        for i in range(4):
+            for j in range(3):
+                for k in range(4):
+                    if k==i:
+                        self.N1212[3*i+j, 3*k+j] = 3.0/4.0
+                    else:
+                        self.N1212[3*i+j, 3*k+j] = -1.0/4.0
+        self.N44 = np.eye(4) - 1/4*np.ones((4,4))
+        self.N66 = np.eye(6) - 1/6*np.ones((6,6))
+
         self.initial_ARAP_shape_list = []
         for i in range(self.num_vertices):
             neighbour_list = self.neighbour_list[i]
@@ -88,7 +106,9 @@ class Flying_carpet:
                 ARAP_shape[j] = self.vertices[neighbour_idx] - self.vertices[i]
             self.initial_ARAP_shape_list.append(ARAP_shape)
         print("initial_ARAP_shape_list length: ", len(self.initial_ARAP_shape_list))
-        self.initial_cable_vec = self.get_cable_vec(self.vertices)
+        self.initial_cable_vec = self.get_cable_vec_bary(self.vertices)
+        self.initial_ghost_vertices = self.get_pp_location_bary(self.vertices)
+        self.initial_ghost_shape_list = self.get_ghost_shape(self.vertices, self.get_pp_location_bary(self.vertices))
         self.W_mat = np.zeros((self.num_vertices * 3, self.num_vertices * 3))
         for i in range(self.num_vertices):
             for j in range(3):
@@ -99,17 +119,15 @@ class Flying_carpet:
         mem_block   = 9  * self.num_triangles
         bend_block  = 3 * len(self.bending_ele_idx)
         cable_block = 3  * self.nCable
-        print("mem_block: ", mem_block)
-        print("num_triangles: ", self.num_triangles)
-        print("bend_block: ", bend_block)
-        print("cable_block: ", cable_block)
-        matA_size = mem_block + bend_block + cable_block
+        ghost_block = 12 * self.nCable
+        matA_size = mem_block + bend_block + cable_block + ghost_block
         max_weight = np.max((np.max(self.bending_weight_list), np.max(self.mem_weight_list)))
-        self.weight_cable = 10 * max_weight
+        self.weight_cable = 0.5 * max_weight
+        self.weight_ghost = 0.5 * max_weight
         self.nNeighbour_list = []
         for i in range(self.num_vertices):
             self.nNeighbour_list.append(len(self.neighbour_list[i]))
-        self.matA_all = np.zeros((matA_size, 3*self.num_vertices))
+        self.matA_all = np.zeros((matA_size, 3*self.num_vertices + 3*self.nCable))
         print("matA_size: ", matA_size)
         for i in range(self.num_triangles):
             mem_weight = self.mem_weight_list[i]
@@ -132,21 +150,34 @@ class Flying_carpet:
                     self.matA_all[mem_block + 3*i + k, 3*v_idx+k] = bending_weight * c
 
         for i in range(self.nCable):
-            idx_pp = self.pp_idx[i]
             for k in range(3):
-                self.matA_all[mem_block + bend_block + 3*i + k, 3*idx_pp+k] = self.weight_cable
+                self.matA_all[mem_block + bend_block + 3*i + k, 3*self.num_vertices+3*i+k] = self.weight_cable
+
+        for i in range(self.nCable):
+            row_start = mem_block + bend_block + cable_block + 12*i
+            tri_idx = self.pp_bary_tri_idx[i]
+            tri = self.mesh_triangles[tri_idx]
+            idx_all = [tri[0], tri[1], tri[2], self.num_vertices + i]
+            for j in range(4):
+                idxj = idx_all[j]
+                for k in range(4):
+                    idxk = idx_all[k]
+                    self.matA_all[row_start + 3*j:row_start+3*j+3, 3*idxk:3*idxk+3] += self.weight_ghost * self.N1212[3*j:3*j+3, 3*k:3*k+3]
+
         print("matA_all shape: ", self.matA_all.shape)
         print("matA_all rank: ", np.linalg.matrix_rank(self.matA_all))
         self.matAT = self.matA_all.T
         self.matATA = self.matA_all.T @ self.matA_all
         self.matATA_inv_AT = np.linalg.inv(self.matATA) @ self.matAT
         self.matATA_inv = np.linalg.inv(self.matATA)
-        self.K_CG = self.matATA_inv_AT[:, -3*self.nCable:]
+        self.K_CG = self.matATA_inv_AT[:, -15*self.nCable:-12*self.nCable]
 
-    def get_CG_Jacobian(self, vertices):
+    def get_CG_Jacobian(self, vertices, ghost_vertices=None):
         if vertices.shape[0] != self.num_vertices:
             vertices = self.q_to_vertices(vertices)
-        R_cable_list = self.get_rotation_cable(vertices)
+        if ghost_vertices is None:
+            ghost_vertices = self.get_pp_location_bary(vertices)
+        R_cable_list = self.get_rotation_cable_ghost(ghost_vertices)
         Bmat = np.zeros((3*self.nCable, self.nCable))
         for i in range(self.nCable):
             cable_vec_rotated = R_cable_list[i] @ self.initial_cable_vec[i]
@@ -213,9 +244,46 @@ class Flying_carpet:
             R_list[i] = R
         return R_list
 
-    def get_Bvec_CG(self, R_list_tri, R_list_cable, tar_cable_length):
+    def get_rotation_ghost(self, vertices, ghost_vertices):
+        R_list = [np.eye(3) for _ in range(self.nCable)]
+        cur_ghost_shapes = self.get_ghost_shape(vertices, ghost_vertices)
+        for i in range(self.nCable):
+            initial_ghost_shape = self.initial_ghost_shape_list[i]
+            cur_ghost_shape = cur_ghost_shapes[i]
+            u, s, vh = np.linalg.svd(cur_ghost_shape.T @ initial_ghost_shape)
+            if np.linalg.det(u @ vh) < 0:
+                u[:, -1] *= -1
+            R = u @ vh
+            R_list[i] = R
+        return R_list
+
+    def get_rotation_cable_ghost(self, ghost_vertices):
+        cur_cable_vec = []
+        R_list = []
+        for i in range(self.nCable): # cable vec pointing from pulley location to ghost vertex
+            cur_cable_vec.append(ghost_vertices[i] - self.pulley_location[i])
+            cur_cable_vec[i] /= np.linalg.norm(cur_cable_vec[i])
+            initial_cable_vec = self.initial_cable_vec[i]
+            if np.linalg.norm(cur_cable_vec[i]) < 1e-6 or np.linalg.norm(initial_cable_vec) < 1e-6:
+                R_list.append(np.eye(3))
+                continue
+            rotation_axis = np.cross(initial_cable_vec, cur_cable_vec[i])
+            if np.linalg.norm(rotation_axis) < 1e-6:
+                R_list.append(np.eye(3))
+                continue
+            rotation_axis = rotation_axis / np.linalg.norm(rotation_axis)
+            angle = np.arccos(np.clip(np.dot(initial_cable_vec, cur_cable_vec[i]), -1.0, 1.0))
+            K = np.array([[ 0,                   -rotation_axis[2],  rotation_axis[1]],
+                          [ rotation_axis[2],     0,                 -rotation_axis[0]],
+                          [-rotation_axis[1],     rotation_axis[0],   0              ]])
+            R = np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * K @ K
+            R_list.append(R)
+        return R_list
+
+    def get_Bvec_CG(self,vertices, ghost_vertices, R_list_tri, R_list_cable, tar_cable_length):
         matA_shape = self.matA_all.shape[0]
         bVec = np.zeros((matA_shape, ))
+        ghost_R_list = self.get_rotation_ghost(vertices, ghost_vertices)
         for i in range(self.num_triangles):
             initial_tri_sk = self.initial_tri_SK_list[i]
             R_tri = R_list_tri[i]
@@ -225,12 +293,19 @@ class Flying_carpet:
                     bVec[idx_row_start+k] += self.mem_weight_list[i] * (R_tri @ initial_tri_sk.T).T[j, k]
         # print("bvec shape: ", bVec.shape)
         for i in range(self.nCable):
-            idx_pp = self.pp_idx[i]
             R_cable = R_list_cable[i]
             initial_cable_vec = self.initial_cable_vec[i]
             vec_rotated = R_cable @ initial_cable_vec
             for k in range(3):
-                bVec[self.matA_all.shape[0] - 3*self.nCable + 3*i+k] += self.weight_cable * vec_rotated[k] * tar_cable_length[i] + self.weight_cable * self.pulley_location[i, k]
+                bVec[self.matA_all.shape[0] - 15*self.nCable + 3*i+k] += self.weight_cable * vec_rotated[k] * tar_cable_length[i] + self.weight_cable * self.pulley_location[i, k]
+        for i in range(self.nCable):
+            R_ghost = ghost_R_list[i]
+            initial_ghost_shape = self.initial_ghost_shape_list[i]
+            rotated_ghost_shape = (R_ghost @ initial_ghost_shape.T).T
+            for j in range(4):
+                idx_row_start = matA_shape - 12*self.nCable + 12*i + 3*j
+                for k in range(3):
+                    bVec[idx_row_start+k] += self.weight_ghost * rotated_ghost_shape[j, k]
         return bVec
     
     def FKD_time(self, target_cable_length, total_time, starting_vertices, tol = 2e-5, show_info = False):
@@ -243,11 +318,10 @@ class Flying_carpet:
         Q_a = Q_a.reshape((3*self.num_vertices, ))
         Q_ad = np.zeros((3*self.num_vertices, ))
         t_a = 0.0
-        h = 0.04
+        h = 0.01
         phi_Qfree = np.zeros((self.nCable, 1))
         H_free = np.zeros((self.nCable, 3*self.num_vertices))
         Q_list = [Q_a.copy()]
-        starting_cable_length = self.get_cable_length(starting_vertices)
         diff_count = 0
         t_start = time.time()
         while t_a < total_time:
@@ -268,22 +342,19 @@ class Flying_carpet:
             # dv_free = A_inv @ b_vec
             dv_free = lu_solve((lu, piv), b_vec)
             Q_free = Q_a + h * Q_ad + h * dv_free
+            cl_free = self.get_cable_length_bary(Q_free)
+            H_free = -self.get_cable_Jacobian_bary(Q_free)
             for i in range(self.nCable):
-                idx_pp = self.pp_idx[i]
-                unit_vec = (self.pulley_location[i,:] - Q_free[3*idx_pp:(3*idx_pp+3)].reshape((3,)))
-                unit_vec = unit_vec / np.linalg.norm(unit_vec)
-                # print("unit_vec: ", unit_vec)
-                phi_Qfree[i] = target_cable_length[i] - np.linalg.norm(self.pulley_location[i] - Q_free[3*idx_pp:3*idx_pp+3].reshape((3,)))
-                H_free[i, 3*idx_pp:3*idx_pp+3] = unit_vec
+                phi_Qfree[i] = target_cable_length[i] - cl_free[i]
             Z1 = lu_solve((lu, piv), H_free.T)                   # (3n, nCable)
             lcp_Mmat = h * H_free @ self.W_mat @ Z1
             lcp_q = phi_Qfree.reshape((self.nCable,))
-            # cable_tension = projected_gauss_seidel_lcp(lcp_Mmat, lcp_q)
-            lcp_sol = qe.optimize.lcp_lemke(lcp_Mmat, lcp_q)
-            if not lcp_sol.success:
-                print("lcp failed: ")
-                break
-            cable_tension = lcp_sol.z
+            cable_tension = projected_gauss_seidel_lcp(lcp_Mmat, lcp_q)
+            # lcp_sol = qe.optimize.lcp_lemke(lcp_Mmat, lcp_q)
+            # if not lcp_sol.success:
+            #     print("lcp failed: ")
+            #     break
+            # cable_tension = lcp_sol.z
             Z2 = lu_solve((lu, piv), self.W_mat @ H_free.T)
             dv_cor = Z2 @ cable_tension
             dv = dv_free + dv_cor
@@ -338,7 +409,7 @@ class Flying_carpet:
                         Jacobian[i] += (ee_poses[j, k] - target_EE_pos[j, k]) * Jac_CG[3*ee_idx_j+k, i]
             return Jacobian
         
-        cur_length = self.get_cable_length(Q)
+        cur_length = self.get_cable_length_bary(Q)
         Q_list, starting_vertices, cable_tension = self.FKD_time(cur_length, 1, starting_vertices, tol = 2e-5)
         Q = self.vertices_to_q(starting_vertices)
         final_Q_list = [Q.copy()]
@@ -346,7 +417,7 @@ class Flying_carpet:
             dl = 0.1
             jac = get_jacobian(Q)
             diff = get_diff(Q)
-            cur_length = self.get_cable_length(Q)
+            cur_length = self.get_cable_length_bary(Q)
             cmd_diff = [0 for _ in range(self.nCable)]
             cmd_length = cur_length.copy()
             # alpha = 1
@@ -372,7 +443,7 @@ class Flying_carpet:
             if diff_cart < tol:
                 print("Converged at iteration {} with diff {}".format(i, diff))
                 break
-            cur_length = self.get_cable_length(Q)
+            cur_length = self.get_cable_length_bary(Q)
         return cur_length, starting_vertices, final_Q_list
 
 
@@ -380,11 +451,16 @@ class Flying_carpet:
         cur_vertices = starting_vertices.copy()
         cur_q = self.vertices_to_q(starting_vertices)
         q_last = cur_q.copy()
+        ghost_vertices = self.get_pp_location_bary(cur_vertices)
         for i in range(max_iter):
+            R_list_cable = self.get_rotation_cable_ghost(ghost_vertices)
             R_list_tri = self.get_rotation_tri(cur_vertices)
-            R_list_cable = self.get_rotation_cable(cur_vertices)
-            bVec = self.get_Bvec_CG(R_list_tri, R_list_cable, tar_cable_length)
-            cur_q = self.matATA_inv_AT @ bVec
+            bVec = self.get_Bvec_CG(cur_vertices, ghost_vertices, R_list_tri, R_list_cable, tar_cable_length)
+            cur_q_all = self.matATA_inv_AT @ bVec
+
+            cur_q = cur_q_all[:3*self.num_vertices]
+            cur_ghost_q = cur_q_all[3*self.num_vertices:]
+            ghost_vertices = cur_ghost_q.reshape((self.nCable, 3))
             cur_vertices = self.q_to_vertices(cur_q)
             diff = np.linalg.norm(cur_q - q_last)/(3*self.num_vertices)
             q_last = cur_q.copy()
@@ -473,6 +549,21 @@ class Flying_carpet:
         ee_poses = vertices[self.ee_idx]
         return ee_poses
 
+    def get_ghost_shape(self, vertices, ghost_vertices):
+        if vertices.shape[0] != self.num_vertices:
+            vertices = self.q_to_vertices(vertices)
+        ghost_shape_list = []
+        for i in range(self.nCable):
+            pp_tri = self.pp_bary_tri_idx[i]
+            tri = self.mesh_triangles[pp_tri]
+            ghost_shape = np.zeros((4,3))
+            for j in range(3):
+                v_idx = tri[j]
+                ghost_shape[j] = vertices[v_idx]
+            ghost_shape[3] = ghost_vertices[i]
+            ghost_shape_list.append(self.N44 @ ghost_shape)
+        return ghost_shape_list
+
     def get_cable_length(self, vertices):
         if vertices.shape[0] != self.num_vertices:
             vertices = self.q_to_vertices(vertices)
@@ -482,7 +573,13 @@ class Flying_carpet:
             pp_vertex = vertices[self.pp_idx[i]]
             cable_length[i] = np.linalg.norm(pulley_location - pp_vertex)
         return cable_length
-    
+
+    def get_cable_length_bary(self, vertices):
+        if vertices.shape[0] != self.num_vertices:
+            vertices = self.q_to_vertices(vertices)
+        pp_locations = self.get_pp_location_bary(vertices)
+        return [np.linalg.norm(self.pulley_location[i] - pp_locations[i]) for i in range(self.nCable)]
+
     def get_cable_vec(self, vertices): # cable vec point from the pulley to the pull point, normalized
         if vertices.shape[0] != self.num_vertices:
             vertices = self.q_to_vertices(vertices)
@@ -493,19 +590,64 @@ class Flying_carpet:
             vec = pp_vertex - pulley_location
             cable_vec[i] = vec / np.linalg.norm(vec)
         return cable_vec
-    
+
+    def get_cable_vec_bary(self, vertices): # cable vec point from the pulley to the pull point, normalized
+        if vertices.shape[0] != self.num_vertices:
+            vertices = self.q_to_vertices(vertices)
+        pp_locations = self.get_pp_location_bary(vertices)
+        cable_vec = np.zeros((self.nCable, 3))
+        for i in range(self.nCable):
+            pulley_location = self.pulley_location[i]
+            vec = pp_locations[i] - pulley_location
+            cable_vec[i] = vec / np.linalg.norm(vec)
+        return cable_vec
+
+    def get_cable_Jacobian_bary(self, vertices):
+        """
+        (nCable, nVertices*3) Jacobian of cable lengths w.r.t. all vertex DOFs,
+        for the barycentric+offset pull-point representation.
+
+        Each column block (3 cols for vertex k) is:
+            u_hat @ (bary_k * I  +  offset * d(t3)/d(v_k))
+        where d(t3)/d(v_k) = P @ Gn_k / (2*area),  P = I - t3 t3^T.
+        """
+        if vertices.shape[0] != self.num_vertices:
+            vertices = self.q_to_vertices(vertices)
+        cable_Jacobian = np.zeros((self.nCable, self.num_vertices * 3))
+        pp_locations = self.get_pp_location_bary(vertices)
+        for i in range(self.nCable):
+            idx_tri = self.description['pp_bary_tri_idx'][i]
+            bary    = self.description['pp_bary_coords'][i]
+            offset  = self.description['pp_bary_offsets'][i]
+            tri     = self.mesh_triangles[idx_tri]
+            v0, v1, v2 = vertices[tri[0]], vertices[tri[1]], vertices[tri[2]]
+            e1, e2 = v1 - v0, v2 - v0
+            n  = np.cross(e1, e2)
+            A2 = np.linalg.norm(n)          # 2 * triangle area
+            t3 = n / A2
+            P  = np.eye(3) - np.outer(t3, t3)
+            # dn/dv_k skew matrices: Gn = (skew(e2-e1), -skew(e2), skew(e1))
+            Gn = (skew(e2 - e1), -skew(e2), skew(e1))
+            vec   = pp_locations[i] - self.pulley_location[i]
+            u_hat = vec / np.linalg.norm(vec)
+            for k in range(3):
+                Gt = (P @ Gn[k]) / A2          # d(t3)/d(v_k), shape (3,3)
+                dpp_dvk = bary[k] * np.eye(3) + offset * Gt
+                col = 3 * tri[k]
+                cable_Jacobian[i, col:col + 3] = u_hat @ dpp_dvk
+        return cable_Jacobian
+
     def visualize_vert(self, vertices):
         mesh = pv.PolyData(vertices, np.hstack((np.full((self.mesh_triangles.shape[0], 1), 3), self.mesh_triangles)))
 
         plotter = pv.Plotter()
         plotter.add_mesh(mesh, color='lightgray', show_edges=True)
-        plotter.add_points(vertices[self.pp_idx], color='blue', point_size=10
-                            , label='Pullpoints')
-        plotter.add_points(self.pulley_location, color='blue', point_size=10
-                            , label='Pulleys')
+        pp_locations = self.get_pp_location_bary(vertices)
+        plotter.add_points(pp_locations, color='blue', point_size=10, label='Pullpoints')
+        plotter.add_points(self.pulley_location, color='blue', point_size=10, label='Pulleys')
         # add lines between pullpoints and pulleys
-        for i in range(len(self.pp_idx)):
-            plotter.add_lines(np.array([vertices[self.pp_idx[i]], self.pulley_location[i]]), color='blue', width=2)
+        for i in range(self.nCable):
+            plotter.add_lines(np.array([pp_locations[i], self.pulley_location[i]]), color='blue', width=2)
         # annotate ee vertices
         plotter.add_points(vertices[self.ee_idx], color='red', point_size=10, label='End Effectors')
 
@@ -515,6 +657,30 @@ class Flying_carpet:
         plotter.add_legend()
         plotter.show()
 
+    def visualize_vert_paper(self, vertices):
+        mesh = pv.PolyData(vertices, np.hstack((np.full((self.mesh_triangles.shape[0], 1), 3), self.mesh_triangles)))
+        mesh_original = pv.PolyData(self.vertices, np.hstack((np.full((self.mesh_triangles.shape[0], 1), 3), self.mesh_triangles)))
+        plotter = pv.Plotter()
+        plotter.add_mesh(mesh_original, color='lightgray', show_edges=False, opacity = 0.5)
+        plotter.add_mesh(mesh, color='blue', show_edges=True)
+        pp_locations = self.get_pp_location_bary(vertices)
+        
+        plotter.add_points(self.pulley_location, color='blue', point_size=10, label='Pulleys')
+        # add lines between pullpoints and pulleys
+        for i in range(self.nCable):
+            if i == 0 or i == 2 or i == 4:
+                plotter.add_points(pp_locations[i], color='blue', point_size=10, label='Pullpoints')
+                plotter.add_lines(np.array([pp_locations[i], self.pulley_location[i]]), color='blue', width=2)
+        # annotate ee vertices
+        plotter.add_points(vertices[self.ee_idx], color='red', point_size=10, label='End Effectors')
+
+        # add grid
+        plotter.show_grid()
+        plotter.show_axes()
+        plotter.add_legend()
+        plotter.show()
+
+
     def visualize_IKD_result(self, target_ee_pos, vertices):
         ee_poses = self.get_ee_poses(vertices)
         mesh = pv.PolyData(vertices, np.hstack((np.full((self.mesh_triangles.shape[0], 1), 3), self.mesh_triangles)))
@@ -523,14 +689,30 @@ class Flying_carpet:
         plotter.add_mesh(mesh, color='lightgray', show_edges=True)
         plotter.add_points(ee_poses, color='red', point_size=10, label='End Effectors')
         # add cables
-        for i in range(len(self.pp_idx)):
-            plotter.add_lines(np.array([vertices[self.pp_idx[i]], self.pulley_location[i]]), color='blue', width=2)
+        pp_locations = self.get_pp_location_bary(vertices)
+        for i in range(self.nCable):
+            plotter.add_lines(np.array([pp_locations[i], self.pulley_location[i]]), color='blue', width=2)
         plotter.add_points(target_ee_pos, color='green', point_size=10, label='Target EE Pos')
         # add grid
         plotter.show_grid()
         plotter.show_axes()
         plotter.add_legend()
         plotter.show()
+
+    def get_pp_location_bary(self, vertices):
+        """Compute pull-point world positions from barycentric coords + normal offset."""
+        if vertices.shape[0] != self.num_vertices:
+            vertices = self.q_to_vertices(vertices)
+        pp_location = np.zeros((self.nCable, 3))
+        for i in range(self.nCable):
+            idx_tri = self.description['pp_bary_tri_idx'][i]
+            bary    = self.description['pp_bary_coords'][i]
+            offset  = self.description['pp_bary_offsets'][i]
+            tri     = self.mesh_triangles[idx_tri]
+            pp_on_surface = bary @ vertices[tri]
+            n = get_normal(vertices[tri])
+            pp_location[i] = pp_on_surface + offset * n
+        return pp_location
 
     def check_bending_params(self):
         val_list = []
@@ -629,7 +811,8 @@ class Flying_carpet:
         surf = pv.PolyData(vertices0.copy(), faces)
         plotter.add_mesh(surf, color='lightgray', show_edges=True)
 
-        pp_cloud = pv.PolyData(vertices0[self.pp_idx].copy())
+        pp_locations = self.get_pp_location_bary(vertices0)
+        pp_cloud = pv.PolyData(pp_locations)
         plotter.add_mesh(pp_cloud, color='blue', point_size=10,
                          render_points_as_spheres=True, label='Pull points')
 
@@ -649,7 +832,7 @@ class Flying_carpet:
         # All cable segments in a single PolyData so points update in-place
         cable_pts = np.empty((2 * self.nCable, 3))
         for i in range(self.nCable):
-            cable_pts[2 * i]     = vertices0[self.pp_idx[i]]
+            cable_pts[2 * i]     = pp_locations[i]
             cable_pts[2 * i + 1] = self.pulley_location[i]
         cable_lines = np.array([[2, 2 * i, 2 * i + 1]
                                  for i in range(self.nCable)]).flatten()
@@ -662,21 +845,22 @@ class Flying_carpet:
         plotter.show_axes()
         plotter.add_legend()
         plotter.open_movie(filePath, framerate=framerate)
-
         for Q in Q_list:
             vertices = _to_vertices(Q)
             surf.points = vertices.copy()
-            pp_cloud.points = vertices[self.pp_idx].copy()
+            
+            pp_locations = self.get_pp_location_bary(vertices)
+            pp_cloud.points = pp_locations
             ee_cloud.points = vertices[self.ee_idx].copy()
             for i in range(self.nCable):
-                cable_pts[2 * i] = vertices[self.pp_idx[i]]
+                cable_pts[2 * i] = pp_locations[i]
             cables.points = cable_pts.copy()
             plotter.write_frame()
 
         plotter.close()
 
 if __name__ == "__main__":
-    description_file = "./models/flying_carpet/flying_carpet_description.pkl"
+    description_file = "./models/flying_carpet/flying_carpet_description_bary.pkl"
     flying_carpet = Flying_carpet(description_file)
     # flying_carpet.check_bending_params()
     # exit(0)
@@ -685,12 +869,12 @@ if __name__ == "__main__":
     shortened_length = 0.05
     tcl = [icl[0]-shortened_length, icl[1]-shortened_length, icl[2]-shortened_length, icl[3]-shortened_length, icl[4], icl[5], icl[6], icl[7]]
     Q_list, vert_length, cable_tension = flying_carpet.FKD_time(tcl, 1, flying_carpet.vertices, tol = 1e-5, show_info=True)
-    # flying_carpet.replay_Q_list(Q_list, filePath="./flying_carpet_FKD.mp4", framerate=10)
-    fcl = flying_carpet.get_cable_length(vert_length)
-    diff_cl = [fcl[i] - tcl[i] for i in range(flying_carpet.nCable)]
-    # print("Final cable length: ", fcl)
-    print("Difference in cable length: ", diff_cl)
-
-    vert_cg = flying_carpet.deform_CG(fcl, flying_carpet.vertices, max_iter=1000, tol=1e-9)
     flying_carpet.visualize_vert(vert_length)
+    # flying_carpet.replay_Q_list(Q_list, filePath="./flying_carpet_FKD.mp4", framerate=10)
+    # fcl = flying_carpet.get_cable_length(vert_length)
+    # diff_cl = [fcl[i] - tcl[i] for i in range(flying_carpet.nCable)]
+    # print("Final cable length: ", fcl)
+
+    # vert_cg = flying_carpet.deform_CG(tcl, flying_carpet.vertices, max_iter=1000, tol=1e-9)
+    # flying_carpet.visualize_vert(vert_cg)
     # flying_carpet.visualize_vert(vert_cg)
