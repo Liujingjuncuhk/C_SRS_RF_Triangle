@@ -123,6 +123,124 @@ class C_SRS_fixedEnd:
         self.ikModel = IK_MLP()
         # exit(0)
 
+    def reassemble_stiffness_matrices(self, Youngs_modulus, Poisson_ratio):
+        """Rebuild all EBST element matrices for new elastic parameters."""
+        E = float(Youngs_modulus)
+        nu = float(Poisson_ratio)
+        if not np.isfinite(E) or E <= 0:
+            raise ValueError("Youngs_modulus must be a finite positive value.")
+        if not np.isfinite(nu) or not -1.0 < nu < 0.5:
+            raise ValueError("Poisson_ratio must satisfy -1 < nu < 0.5.")
+        if not np.isfinite(self.thickness) or self.thickness <= 0:
+            raise ValueError("thickness must be a finite positive value.")
+
+        t = self.thickness
+        tol = 1e-12
+        C = np.array([
+            [1.0, nu, 0.0],
+            [nu, 1.0, 0.0],
+            [0.0, 0.0, (1.0 - nu) / 2.0],
+        ])
+        Dm = E * t / (1.0 - nu**2) * C
+        Db = E * t**3 / (12.0 * (1.0 - nu**2)) * C
+
+        stiffness_matrices = []
+        for element_idx, indices in enumerate(self.mesh_RF_triangles):
+            indices = np.asarray(indices, dtype=int)
+            if np.any(indices[:3] == -1):
+                raise ValueError(
+                    f"Element {element_idx} has a ghost node in its central triangle."
+                )
+            X = self.vertices[indices]
+
+            x0, x1, x2 = X[:3]
+            v1, v2 = x1 - x0, x2 - x0
+            normal = np.cross(v1, v2)
+            normal_norm = np.linalg.norm(normal)
+            if normal_norm < tol:
+                raise ValueError(f"Element {element_idx} has a degenerate central triangle.")
+
+            area = 0.5 * normal_norm
+            t3 = normal / normal_norm
+            v1_norm = np.linalg.norm(v1)
+            if v1_norm < tol:
+                raise ValueError(f"Element {element_idx} has a zero-length first edge.")
+            e1 = v1 / v1_norm
+            e2 = np.cross(t3, e1)
+
+            def cst_grad(points):
+                """Shape-function gradients expressed in the central local frame."""
+                u1, u2 = points[1] - points[0], points[2] - points[0]
+                tri_normal = np.cross(u1, u2)
+                twice_area = np.linalg.norm(tri_normal)
+                if twice_area < tol:
+                    return None
+                u1_norm = np.linalg.norm(u1)
+                if u1_norm < tol:
+                    return None
+                f1 = u1 / u1_norm
+                f3 = tri_normal / twice_area
+                f2 = np.cross(f3, f1)
+                local_points = (points - points[0]) @ np.vstack([f1, f2]).T
+                (xa, ya), (xb, yb), (xc, yc) = local_points
+                determinant = (xb - xa) * (yc - ya) - (xc - xa) * (yb - ya)
+                if abs(determinant) < tol:
+                    return None
+                b = np.array([yb - yc, yc - ya, ya - yb]) / determinant
+                c = np.array([xc - xb, xa - xc, xb - xa]) / determinant
+                frame_transform = np.array([
+                    [f1 @ e1, f1 @ e2],
+                    [f2 @ e1, f2 @ e2],
+                ])
+                return np.column_stack([b, c]) @ frame_transform
+
+            dNm = cst_grad(X[:3])
+            if dNm is None:
+                raise ValueError(f"Element {element_idx} has a degenerate central triangle.")
+
+            Bm = np.zeros((3, 18))
+            for local_node in range(3):
+                Na, Nb = dNm[local_node]
+                col = slice(3*local_node, 3*local_node+3)
+                Bm[0, col] = Na * e1
+                Bm[1, col] = Nb * e2
+                Bm[2, col] = Na * e2 + Nb * e1
+
+            Bb = np.zeros((3, 18))
+            side_nodes = ((1, 2, 3), (2, 0, 4), (0, 1, 5))
+            for side, nodes in enumerate(side_nodes):
+                if indices[nodes[2]] == -1:
+                    continue
+                dNi = cst_grad(X[list(nodes)])
+                if dNi is None:
+                    continue
+                NMa, NMb = dNm[side]
+                for local_node, patch_node in enumerate(nodes):
+                    Ta, Tb = dNi[local_node]
+                    coefficients = np.array([
+                        NMa * Ta,
+                        NMb * Tb,
+                        NMa * Tb + NMb * Ta,
+                    ])
+                    col = slice(3*patch_node, 3*patch_node+3)
+                    Bb[:, col] += np.outer(coefficients, t3)
+
+            K = area * (Bm.T @ Dm @ Bm) + area * (Bb.T @ Db @ Bb)
+            for slot, vertex_idx in enumerate(indices):
+                if vertex_idx == -1:
+                    dofs = slice(3*slot, 3*slot+3)
+                    K[dofs, :] = 0.0
+                    K[:, dofs] = 0.0
+            stiffness_matrices.append(K)
+
+        self.stiffness_matrices = stiffness_matrices
+        self.Youngs_modulus = E
+        self.Poisson_ratio = nu
+        self.description['stiffness_matrices'] = stiffness_matrices
+        self.description['Youngs_modulus'] = E
+        self.description['Poisson_ratio'] = nu
+        return self.stiffness_matrices
+
     def assemble_CG_matrices(self):
         mem_block   = 9  * self.num_triangles
         bend_block  = 3 * len(self.bending_ele_idx)
@@ -130,8 +248,8 @@ class C_SRS_fixedEnd:
         ghost_block = 12 * self.nCable
         matA_size = mem_block + bend_block + cable_block + ghost_block
         max_weight = np.max((np.max(self.mem_weight_list), np.max(self.bending_weight_list)))
-        self.weight_cable = 0.5 * max_weight
-        self.weight_ghost = 0.5 * max_weight
+        self.weight_cable = 10 * max_weight
+        self.weight_ghost = 10 * max_weight
         self.nNeighbour_list = []
         for i in range(self.num_vertices):
             self.nNeighbour_list.append(len(self.neighbour_list[i]))
@@ -363,6 +481,43 @@ class C_SRS_fixedEnd:
                 break
         return cur_vertices
 
+    def FKD_free(self, show_info = False):
+        starting_vertices = self.vertices.copy()
+        Q_a = self.vertices_to_q(starting_vertices)
+        Q_list = [Q_a.copy()]
+        total_time = 5
+        Q_a = Q_a.reshape((3*self.num_vertices, ))
+        Q_ad = np.zeros((3*self.num_vertices, ))
+        t_a = 0.0
+        h = 0.01
+        tol = 1e-7
+        diff_count = 0
+        while t_a < total_time:
+            Q_a_last = Q_a.copy()
+            R_list, R_list_1818 = self.get_R_list(self.q_to_vertices(Q_a))
+            K_mat, f0 = self.assemble_K(R_list_1818)
+            disp = Q_a - self.vertices_to_q(self.vertices)
+            denom = disp @ self.mass_matrix @ disp
+            damping_coeff = np.sqrt((disp @ K_mat @ disp) / denom) if denom > 1e-30 else 0.0
+            C_mat = 2 * damping_coeff * self.mass_matrix
+            A_mat = (1.0/h)*np.eye(3*self.num_vertices) + h * self.W_mat @ K_mat + self.W_mat @ C_mat
+            lu, piv = lu_factor(A_mat)
+            b_vec = self.W_mat @ (-K_mat @ (Q_a + h * Q_ad) + f0 + self.gravity_vec - C_mat @ Q_ad)
+            dv = lu_solve((lu, piv), b_vec)
+            Q_ad = Q_ad + dv
+            Q_a = Q_a + h * Q_ad
+            t_a += h
+            Q_list.append(Q_a.copy())
+            diff = np.linalg.norm(Q_a - Q_a_last)/(3*self.num_vertices)
+            if show_info:
+                print(f"t_a: {t_a:.3f}, diff: {diff:.7f}")
+            if diff < tol :
+                diff_count += 1
+                if diff_count >= 10:
+                    print(f"Converged at time {t_a:.2f} with diff {diff:.6f} for 10 consecutive steps, stopping simulation.")
+                    break
+        return Q_list
+
     def FKD_time(self, target_cable_length, total_time, starting_vertices, tol = 2e-5, show_info = False):
         if starting_vertices.shape[0] == 3*self.num_vertices:
             Q_a = starting_vertices.copy()
@@ -434,6 +589,54 @@ class C_SRS_fixedEnd:
         vert_length = self.q_to_vertices(Q_a)
         return Q_list, vert_length, cable_tension
             
+    def FKD_free_static(self, show_info = False):
+        """Solve the gravity-only corotational equilibrium on moving vertices."""
+        Q_a = self.vertices_to_q(self.vertices).reshape((3*self.num_vertices, ))
+        Q_list = [Q_a.copy()]
+        gravity_tilde = self.q_to_q_moving(self.gravity_vec)
+        max_iter = 500
+        tol = 1e-8
+
+        for iteration in range(max_iter):
+            _, R_list_1818 = self.get_R_list(self.q_to_vertices(Q_a))
+            K_tilde, f0_tilde, K_tilde_vec2add = self.assemble_K_tilde(R_list_1818)
+
+            # Moving part of K q = f0 + f_gravity, after moving the
+            # fixed-vertex contribution K_mf q_f to the right-hand side.
+            rhs = f0_tilde + gravity_tilde + K_tilde_vec2add
+            try:
+                Q_moving = np.linalg.solve(K_tilde, rhs)
+            except np.linalg.LinAlgError as exc:
+                raise np.linalg.LinAlgError(
+                    "The reduced stiffness matrix is singular; check that the "
+                    "fixed region removes all rigid-body modes."
+                ) from exc
+
+            Q_next = self.q_moving_to_q(Q_moving)
+            diff = np.linalg.norm(Q_next - Q_a) / (3*self.nMoving)
+            Q_a = Q_next
+            Q_list.append(Q_a.copy())
+
+            if show_info:
+                residual = np.linalg.norm(K_tilde @ Q_moving - rhs)
+                print(
+                    f"static iteration {iteration + 1}: diff = {diff:.7e}, "
+                    f"linear residual = {residual:.7e}"
+                )
+            if diff < tol:
+                if show_info:
+                    print(f"Static solve converged in {iteration + 1} iterations.")
+                break
+        else:
+            if show_info:
+                print(
+                    f"Static solve reached {max_iter} iterations without "
+                    f"meeting the tolerance (last diff = {diff:.7e})."
+                )
+
+        return Q_list
+
+
 
     def IKD_single(self, target_ee_pos, starting_vertices, AA = False, tol = 1e-3):
         idx_ee = self.ee_idx[0]
@@ -753,7 +956,42 @@ class C_SRS_fixedEnd:
                     continue
                 f0[3*tri[j]:3*tri[j]+3] += f0e[3*j:3*j+3]
         return K_mat, f0
-         
+
+    def assemble_K_tilde(self, R_list_1818):
+        """Assemble K_mm, f0_m, and the fixed-DOF term -K_mf q_f."""
+        Ke_list = [np.zeros((18,18)) for _ in range(self.num_RF_triangles)]
+        Ke0_list = [np.zeros((18,18)) for _ in range(self.num_RF_triangles)]
+        K_tilde = np.zeros((self.nMoving * 3, self.nMoving * 3))
+        f0_tilde = np.zeros(self.nMoving * 3)
+        K_tilde_vec2add = np.zeros(3*self.nMoving,)
+        for i in range(self.num_RF_triangles):
+            Ke_list[i] = R_list_1818[i] @ self.stiffness_matrices[i] @ R_list_1818[i].T
+            Ke0_list[i] = R_list_1818[i] @ self.stiffness_matrices[i]
+            tri = self.mesh_RF_triangles[i]
+            qe0 = self.qe0_list[i]
+            f0e = Ke0_list[i] @ qe0
+            for j in range(6):
+                if tri[j] == -1:
+                    continue
+                idx_j_moving = self.idxAll_2_idxMoving[tri[j]]
+                if idx_j_moving == -1:
+                    continue
+
+                row = slice(3*idx_j_moving, 3*idx_j_moving+3)
+                f0_tilde[row] += f0e[3*j:3*j+3]
+                for k in range(6):
+                    if tri[k] == -1:
+                        continue
+                    Ke_jk = Ke_list[i][3*j:3*j+3, 3*k:3*k+3]
+                    idx_k_moving = self.idxAll_2_idxMoving[tri[k]]
+                    if idx_k_moving == -1:
+                        K_tilde_vec2add[row] -= Ke_jk @ self.vertices[tri[k]]
+                    else:
+                        col = slice(3*idx_k_moving, 3*idx_k_moving+3)
+                        K_tilde[row, col] += Ke_jk
+
+        return K_tilde, f0_tilde, K_tilde_vec2add
+
     def get_R_list(self, vertices):
         if vertices.shape[0] != self.num_vertices:
             vertices = self.q_to_vertices(vertices)
@@ -783,7 +1021,7 @@ class C_SRS_fixedEnd:
         q_moving = np.zeros((self.nMoving * 3, ))
         for i in range(self.num_vertices):
             if self.idxAll_2_idxMoving[i] != -1:
-                idx_moving = i - self.idxAll_2_idxMoving[i] - 1
+                idx_moving = self.idxAll_2_idxMoving[i]
                 q_moving[3*idx_moving:3*idx_moving+3] = q[3*i:3*i+3]
         return q_moving
     
@@ -1043,7 +1281,8 @@ class C_SRS_fixedEnd:
         surf = pv.PolyData(vertices0.copy(), faces)
         plotter.add_mesh(surf, color='lightgray', show_edges=True)
 
-        pp_cloud = pv.PolyData(vertices0[self.pp_idx].copy())
+        pp_location = self.get_pp_location_bary(vertices0)
+        pp_cloud = pv.PolyData(pp_location.copy())
         plotter.add_mesh(pp_cloud, color='blue', point_size=10,
                          render_points_as_spheres=True, label='Pull points')
 
@@ -1062,7 +1301,7 @@ class C_SRS_fixedEnd:
         # All cable segments in a single PolyData so points update in-place
         cable_pts = np.empty((2 * self.nCable, 3))
         for i in range(self.nCable):
-            cable_pts[2 * i]     = vertices0[self.pp_idx[i]]
+            cable_pts[2 * i]     = pp_location[i]
             cable_pts[2 * i + 1] = self.pulley_location[i]
         cable_lines = np.array([[2, 2 * i, 2 * i + 1]
                                  for i in range(self.nCable)]).flatten()
@@ -1079,11 +1318,12 @@ class C_SRS_fixedEnd:
         for Q in Q_list:
             vertices = _to_vertices(Q)
             surf.points = vertices.copy()
-            pp_cloud.points = vertices[self.pp_idx].copy()
+            pp_locations = self.get_pp_location_bary(vertices)
+            pp_cloud.points = pp_locations.copy()
             ee_cloud.points = vertices[self.ee_idx].copy()
             fixed_cloud.points = vertices[self.fixed_idx].copy()
             for i in range(self.nCable):
-                cable_pts[2 * i] = vertices[self.pp_idx[i]]
+                cable_pts[2 * i] = pp_locations[i]
             cables.points = cable_pts.copy()
             plotter.write_frame()
 
@@ -1187,6 +1427,10 @@ if __name__ == "__main__":
     description_file = "./models/flat_tri_surface/C_SRS_description_bary.pkl"
     c_srs = C_SRS_fixedEnd(description_file)
     icl = c_srs.initial_cable_length.copy()
+    Q_list = c_srs.FKD_free_static(1)
+    c_srs.visualize_vert(c_srs.q_to_vertices(Q_list[-1]))
+    c_srs.replay_Q_list(Q_list, "./c_srs_free_static.mp4")
+    exit(0)
     # cl_range_1 = [[icl[0]-0.08, icl[0]-0.02], 
     #             [icl[1]-0.08, icl[1]-0.02],
     #             [icl[2]-0.08, icl[2]-0.02],
