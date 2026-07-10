@@ -595,7 +595,7 @@ class C_SRS_fixedEnd:
         Q_list = [Q_a.copy()]
         gravity_tilde = self.q_to_q_moving(self.gravity_vec)
         max_iter = 500
-        tol = 1e-8
+        tol = 1e-7
 
         for iteration in range(max_iter):
             _, R_list_1818 = self.get_R_list(self.q_to_vertices(Q_a))
@@ -1085,6 +1085,28 @@ class C_SRS_fixedEnd:
             pp_location[i] = pp_on_surface + offset * n
         return pp_location
 
+    def get_fb_surface(self, vertices):
+        """Return vertices shifted by half-thickness toward the mid-surface along vertex normals."""
+        if vertices.shape[0] != self.num_vertices:
+            vertices = self.q_to_vertices(vertices)
+
+        vertex_normals = np.zeros_like(vertices, dtype=float)
+        tol = 1e-12
+        for tri in self.mesh_triangles:
+            tri_vertices = vertices[tri]
+            tri_normal = np.cross(tri_vertices[1] - tri_vertices[0], tri_vertices[2] - tri_vertices[0])
+            if np.linalg.norm(tri_normal) < tol:
+                continue
+            vertex_normals[tri] += tri_normal
+
+        normal_norms = np.linalg.norm(vertex_normals, axis=1, keepdims=True)
+        valid_mask = normal_norms[:, 0] > tol
+        vertex_normals[valid_mask] /= normal_norms[valid_mask]
+        if np.any(~valid_mask):
+            vertex_normals[~valid_mask] = np.array([0.0, 0.0, 1.0])
+
+        return vertices + 0.5 * self.thickness * vertex_normals
+
     def get_cable_Jacobian_bary(self, vertices):
         """
         (nCable, nVertices*3) Jacobian of cable lengths w.r.t. all vertex DOFs,
@@ -1139,6 +1161,25 @@ class C_SRS_fixedEnd:
         # make fixed idx black
         plotter.add_points(vertices[self.fixed_idx], color='black', point_size=10, label='Fixed Vertices')
         # add grid
+        plotter.show_grid()
+        plotter.show_axes()
+        plotter.add_legend()
+        plotter.show()
+
+    def visualize_fb_surface(self, vertices):
+        if vertices.shape[0] != self.num_vertices:
+            vertices = self.q_to_vertices(vertices)
+
+        fb_vertices = self.get_fb_surface(vertices)
+        faces = np.hstack((np.full((self.mesh_triangles.shape[0], 1), 3), self.mesh_triangles))
+        mesh_surface = pv.PolyData(vertices, faces)
+        mesh_fb = pv.PolyData(fb_vertices, faces)
+
+        plotter = pv.Plotter()
+        plotter.add_mesh(mesh_surface, color='lightgray', show_edges=True, opacity=0.35, label='Input Surface')
+        plotter.add_mesh(mesh_fb, color='lightblue', show_edges=True, opacity=0.95, label='FB Mid-Surface')
+        plotter.add_points(fb_vertices[self.ee_idx], color='magenta', point_size=10, label='FB EE Vertices')
+        plotter.add_points(vertices[self.fixed_idx], color='black', point_size=10, label='Fixed Vertices')
         plotter.show_grid()
         plotter.show_axes()
         plotter.add_legend()
@@ -1428,8 +1469,8 @@ if __name__ == "__main__":
     c_srs = C_SRS_fixedEnd(description_file)
     icl = c_srs.initial_cable_length.copy()
     Q_list = c_srs.FKD_free_static(1)
-    c_srs.visualize_vert(c_srs.q_to_vertices(Q_list[-1]))
-    c_srs.replay_Q_list(Q_list, "./c_srs_free_static.mp4")
+    c_srs.visualize_fb_surface(c_srs.q_to_vertices(Q_list[-1]))
+    # c_srs.replay_Q_list(Q_list, "./c_srs_free_static.mp4")
     exit(0)
     # cl_range_1 = [[icl[0]-0.08, icl[0]-0.02], 
     #             [icl[1]-0.08, icl[1]-0.02],

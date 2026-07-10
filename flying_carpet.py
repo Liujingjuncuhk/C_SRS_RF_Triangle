@@ -602,6 +602,28 @@ class Flying_carpet:
             cable_vec[i] = vec / np.linalg.norm(vec)
         return cable_vec
 
+    def get_fb_surface(self, vertices):
+        """Return vertices shifted by half-thickness along vertex normals."""
+        if vertices.shape[0] != self.num_vertices:
+            vertices = self.q_to_vertices(vertices)
+
+        vertex_normals = np.zeros_like(vertices, dtype=float)
+        tol = 1e-12
+        for tri in self.mesh_triangles:
+            tri_vertices = vertices[tri]
+            tri_normal = np.cross(tri_vertices[1] - tri_vertices[0], tri_vertices[2] - tri_vertices[0])
+            if np.linalg.norm(tri_normal) < tol:
+                continue
+            vertex_normals[tri] += tri_normal
+
+        normal_norms = np.linalg.norm(vertex_normals, axis=1, keepdims=True)
+        valid_mask = normal_norms[:, 0] > tol
+        vertex_normals[valid_mask] /= normal_norms[valid_mask]
+        if np.any(~valid_mask):
+            vertex_normals[~valid_mask] = np.array([0.0, 0.0, 1.0])
+
+        return vertices + 0.5 * self.thickness * vertex_normals
+
     def get_cable_Jacobian_bary(self, vertices):
         """
         (nCable, nVertices*3) Jacobian of cable lengths w.r.t. all vertex DOFs,
@@ -652,6 +674,24 @@ class Flying_carpet:
         plotter.add_points(vertices[self.ee_idx], color='red', point_size=10, label='End Effectors')
 
         # add grid
+        plotter.show_grid()
+        plotter.show_axes()
+        plotter.add_legend()
+        plotter.show()
+
+    def visualize_fb_surface(self, vertices):
+        if vertices.shape[0] != self.num_vertices:
+            vertices = self.q_to_vertices(vertices)
+
+        fb_vertices = self.get_fb_surface(vertices)
+        faces = np.hstack((np.full((self.mesh_triangles.shape[0], 1), 3), self.mesh_triangles))
+        mesh_surface = pv.PolyData(vertices, faces)
+        mesh_fb = pv.PolyData(fb_vertices, faces)
+
+        plotter = pv.Plotter()
+        plotter.add_mesh(mesh_surface, color='lightgray', show_edges=True, opacity=0.35, label='Input Surface')
+        plotter.add_mesh(mesh_fb, color='lightblue', show_edges=True, opacity=0.95, label='FB Mid-Surface')
+        plotter.add_points(fb_vertices[self.ee_idx], color='magenta', point_size=10, label='FB EE Vertices')
         plotter.show_grid()
         plotter.show_axes()
         plotter.add_legend()
@@ -869,7 +909,7 @@ if __name__ == "__main__":
     shortened_length = 0.05
     tcl = [icl[0]-shortened_length, icl[1]-shortened_length, icl[2]-shortened_length, icl[3]-shortened_length, icl[4], icl[5], icl[6], icl[7]]
     Q_list, vert_length, cable_tension = flying_carpet.FKD_time(tcl, 1, flying_carpet.vertices, tol = 1e-5, show_info=True)
-    flying_carpet.visualize_vert(vert_length)
+    flying_carpet.visualize_fb_surface(vert_length)
     # flying_carpet.replay_Q_list(Q_list, filePath="./flying_carpet_FKD.mp4", framerate=10)
     # fcl = flying_carpet.get_cable_length(vert_length)
     # diff_cl = [fcl[i] - tcl[i] for i in range(flying_carpet.nCable)]
