@@ -49,6 +49,7 @@ class Flying_carpet:
         self.Youngs_modulus = self.description['Youngs_modulus']
         self.Youngs_modulus = 3.0e7
         self.Poisson_ratio = self.description['Poisson_ratio']
+        self.Poisson_ratio = 0.39
         self.density = self.description['density']
         self.density = 619.230769230769
         self.ARAP_weight_list = self.description['weight_list']
@@ -679,7 +680,7 @@ class Flying_carpet:
         # add grid
         plotter.show_grid()
         plotter.show_axes()
-        plotter.add_legend()
+        # plotter.add_legend()
         plotter.show()
 
     def visualize_fb_surface(self, vertices):
@@ -904,9 +905,14 @@ class Flying_carpet:
 if __name__ == "__main__":
     description_file = "./models/flying_carpet/flying_carpet_description_bary.pkl"
     flying_carpet = Flying_carpet(description_file)
+    print("number of vertices: ", flying_carpet.num_vertices)
+    print("number of triangles: ", flying_carpet.mesh_triangles.shape[0])
+    print("initial ee locations: ", flying_carpet.get_ee_poses(flying_carpet.vertices))
+
     # flying_carpet.check_bending_params()
     # exit(0)
-    # flying_carpet.visualize_vert(flying_carpet.vertices)
+    flying_carpet.visualize_vert(flying_carpet.vertices)
+    exit(0)
     icl = flying_carpet.initial_cable_length
     shortened_length = 0.05
     tcl = [icl[0]-shortened_length, icl[1]-shortened_length, icl[2]-shortened_length, icl[3]-shortened_length, icl[4], icl[5], icl[6], icl[7]]

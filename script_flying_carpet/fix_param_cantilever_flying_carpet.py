@@ -263,9 +263,9 @@ if __name__ == "__main__":
     description_file = args.description_file
     flying_carpet = Flying_carpet_fixedEnd(description_file)
     E_range = []
-    E_range.extend(np.arange(0.1e7, 3.5e7, 0.1e7))
-    E_range.extend(np.arange(3.5e7+0.01e7, 3.6e7, 0.01e7))
-    E_range.extend(np.arange(3.6e7+0.1e7,1.0e8, 0.1e7))
+    E_range.extend(np.arange(0.1e7, 2.5e7, 0.1e7))
+    E_range.extend(np.arange(2.5e7+0.01e7, 3.6e7, 0.01e7))
+    E_range.extend(np.arange(3.6e7+0.1e7, 5e7, 0.1e7))
 
     with open(args.pts_gt_file, "rb") as f:
         pts_gt = pickle.load(f)

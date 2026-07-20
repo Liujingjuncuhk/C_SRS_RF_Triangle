@@ -39,6 +39,7 @@ class C_SRS_fixedEnd:
         self.Youngs_modulus = self.description['Youngs_modulus']
         self.Youngs_modulus = 3.58e7
         self.Poisson_ratio = self.description['Poisson_ratio']
+        self.Poisson_ratio = 0.39
         self.reassemble_stiffness_matrices(self.Youngs_modulus, self.description['Poisson_ratio'])
         self.density = self.description['density']
         self.ARAP_weight_list = self.description['weight_list']
@@ -1760,9 +1761,13 @@ if __name__ == "__main__":
     description_file = "./models/flat_tri_surface/C_SRS_description_bary.pkl"
     c_srs = C_SRS_fixedEnd(description_file)
     icl = c_srs.initial_cable_length.copy()
+    print("number of vertices: ", c_srs.num_vertices)
+    print("")
+    c_srs.visualize_vert(c_srs.vertices)
+    exit(0)
     # tcl = [icl[0]+0.1, icl[1]+0.1, icl[2]-0.04, icl[3]+0.1, icl[4]-0.01, icl[5]+0.1]
-    Q_list = c_srs.FKD_static(c_srs.vertices, [1,1,1,1,1,1],tol = 1e-6, show_info = True)
-    c_srs.visualize_vert(Q_list[-1])
+    # Q_list = c_srs.FKD_static(c_srs.vertices, [1,1,1,1,1,1],tol = 1e-6, show_info = True)
+    # c_srs.visualize_vert(Q_list[-1])
     cl_final = c_srs.get_cable_length_bary(Q_list[-1])
     Q_list, cable_tension = c_srs.FKD_static_length(c_srs.vertices, cl_final, tol = 1e-6, show_info = True)
     c_srs.visualize_vert(Q_list[-1])
