@@ -1,0 +1,3 @@
+best_E,30000000.0
+best_difference,0.0029044004460249987
+best_screenshot,results_fitE_flying_carpet/fb_surface_E_3.00e+07.png

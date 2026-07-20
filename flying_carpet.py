@@ -47,8 +47,10 @@ class Flying_carpet:
         self.n_bending_ele = len(self.bending_ele_idx)
         self.thickness = self.description['thickness']
         self.Youngs_modulus = self.description['Youngs_modulus']
+        self.Youngs_modulus = 3.0e7
         self.Poisson_ratio = self.description['Poisson_ratio']
         self.density = self.description['density']
+        self.density = 619.230769230769
         self.ARAP_weight_list = self.description['weight_list']
         self.edge_list = self.description['edge_list']
         self.neighbour_list = self.description['neighbour_list']
@@ -114,6 +116,7 @@ class Flying_carpet:
             for j in range(3):
                 self.W_mat[3*i+j, 3*i+j] = 1 / self.mass_matrix[3*i+j, 3*i+j]
         self.assemble_CG_matrices()
+
 
     def assemble_CG_matrices(self):
         mem_block   = 9  * self.num_triangles
@@ -708,9 +711,8 @@ class Flying_carpet:
         plotter.add_points(self.pulley_location, color='blue', point_size=10, label='Pulleys')
         # add lines between pullpoints and pulleys
         for i in range(self.nCable):
-            if i == 0 or i == 2 or i == 4:
-                plotter.add_points(pp_locations[i], color='blue', point_size=10, label='Pullpoints')
-                plotter.add_lines(np.array([pp_locations[i], self.pulley_location[i]]), color='blue', width=2)
+            plotter.add_points(pp_locations[i], color='blue', point_size=10, label='Pullpoints')
+            plotter.add_lines(np.array([pp_locations[i], self.pulley_location[i]]), color='blue', width=2)
         # annotate ee vertices
         plotter.add_points(vertices[self.ee_idx], color='red', point_size=10, label='End Effectors')
 
@@ -909,7 +911,8 @@ if __name__ == "__main__":
     shortened_length = 0.05
     tcl = [icl[0]-shortened_length, icl[1]-shortened_length, icl[2]-shortened_length, icl[3]-shortened_length, icl[4], icl[5], icl[6], icl[7]]
     Q_list, vert_length, cable_tension = flying_carpet.FKD_time(tcl, 1, flying_carpet.vertices, tol = 1e-5, show_info=True)
-    flying_carpet.visualize_fb_surface(vert_length)
+    # flying_carpet.visualize_fb_surface(vert_length)
+    flying_carpet.visualize_vert_paper(vert_length)
     # flying_carpet.replay_Q_list(Q_list, filePath="./flying_carpet_FKD.mp4", framerate=10)
     # fcl = flying_carpet.get_cable_length(vert_length)
     # diff_cl = [fcl[i] - tcl[i] for i in range(flying_carpet.nCable)]

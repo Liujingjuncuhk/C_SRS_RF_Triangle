@@ -37,7 +37,9 @@ class C_SRS_fixedEnd:
         self.n_bending_ele = len(self.bending_ele_idx)
         self.thickness = self.description['thickness']
         self.Youngs_modulus = self.description['Youngs_modulus']
+        self.Youngs_modulus = 3.58e7
         self.Poisson_ratio = self.description['Poisson_ratio']
+        self.reassemble_stiffness_matrices(self.Youngs_modulus, self.description['Poisson_ratio'])
         self.density = self.description['density']
         self.ARAP_weight_list = self.description['weight_list']
         self.edge_list = self.description['edge_list']
@@ -241,6 +243,79 @@ class C_SRS_fixedEnd:
         self.description['Poisson_ratio'] = nu
         return self.stiffness_matrices
 
+    def reassemble_CG_matrices(self, ratio_weight_cable):
+        mem_block   = 9  * self.num_triangles
+        bend_block  = 3 * len(self.bending_ele_idx)
+        cable_block = 3  * self.nCable
+        ghost_block = 12 * self.nCable
+        matA_size = mem_block + bend_block + cable_block + ghost_block
+        max_weight = np.max((np.max(self.mem_weight_list), np.max(self.bending_weight_list)))
+        self.weight_cable = ratio_weight_cable * max_weight
+        self.weight_ghost = ratio_weight_cable * max_weight
+        self.nNeighbour_list = []
+        for i in range(self.num_vertices):
+            self.nNeighbour_list.append(len(self.neighbour_list[i]))
+        self.matA_initial = np.zeros((matA_size, 3*self.num_vertices + 3*self.nCable))
+        print("matA_size: ", matA_size)
+        self.vecB_2_add = np.zeros((matA_size, ))
+
+        # Membrane blocks: w * (N33 ⊗ I_3) per triangle
+        # Row (9i + 3j + k): centroid-subtracted position of local vertex j, coord k
+        #   col 3*v_j  + k : +2/3   (same vertex, same coord)
+        #   col 3*v_j' + k : -1/3   (other triangle vertices, same coord k)
+        for i in range(self.num_triangles):
+            mem_weight = self.mem_weight_list[i]
+            for j in range(3):          # local vertex (row block)
+                idx_row_start = 9*i + 3*j
+                for k in range(3):      # coordinate direction
+                    for jp in range(3): # iterate over all triangle vertices (columns)
+                        v_jp = self.mesh_triangles[i][jp]
+                        coeff = (2.0/3.0) if jp == j else (-1.0/3.0)
+                        self.matA_initial[idx_row_start+k, 3*v_jp+k] = mem_weight * coeff
+
+        for i in range(len(self.bending_ele_idx)):
+            bending_weight = self.bending_weight_list[i]
+            v0, v1, v2, v3 = self.bending_ele_idx[i]
+            c1, c2, c3, c4 = self.bending_ele_param[i]
+            for j in range(4):
+                v_idx = self.bending_ele_idx[i,j]
+                c = self.bending_ele_param[i,j]
+                for k in range(3):
+                    self.matA_initial[mem_block + 3*i + k, 3*v_idx+k] = bending_weight * c
+
+        for i in range(self.nCable):
+            for k in range(3):
+                self.matA_initial[mem_block + bend_block + 3*i + k, 3*self.num_vertices+3*i+k] = self.weight_cable
+
+        for i in range(self.nCable):
+            row_start = mem_block + bend_block + cable_block + 12*i
+            tri_idx = self.pp_bary_tri_idx[i]
+            tri = self.mesh_triangles[tri_idx]
+            idx_all = [tri[0], tri[1], tri[2], self.num_vertices + i]
+            for j in range(4):
+                idxj = idx_all[j]
+                for k in range(4):
+                    idxk = idx_all[k]
+                    self.matA_initial[row_start + 3*j:row_start+3*j+3, 3*idxk:3*idxk+3] += self.weight_ghost * self.N1212[3*j:3*j+3, 3*k:3*k+3]
+
+        self.matA_all = np.zeros((matA_size, 3*self.nMoving + 3*self.nCable))
+        for i in range(self.num_vertices):
+            idx_moving = self.idxAll_2_idxMoving[i]
+            if idx_moving != -1:
+                self.matA_all[:, 3*idx_moving:3*idx_moving+3] = self.matA_initial[:, 3*i:3*i+3]
+            else:
+                self.vecB_2_add -= self.matA_initial[:, 3*i:3*i+3] @ self.vertices[i]
+
+        self.matA_all[:, 3*self.nMoving:] = self.matA_initial[:, 3*self.num_vertices:]
+
+        print("matA_all shape: ", self.matA_all.shape)
+        print("matA_all rank: ", np.linalg.matrix_rank(self.matA_all))
+        self.matAT = self.matA_all.T
+        self.matATA = self.matA_all.T @ self.matA_all
+        self.matATA_inv_AT = np.linalg.inv(self.matATA) @ self.matAT
+        self.matATA_inv = np.linalg.inv(self.matATA)
+        self.K_CG = self.matATA_inv_AT[:, -15*self.nCable:-12*self.nCable]
+
     def assemble_CG_matrices(self):
         mem_block   = 9  * self.num_triangles
         bend_block  = 3 * len(self.bending_ele_idx)
@@ -248,8 +323,8 @@ class C_SRS_fixedEnd:
         ghost_block = 12 * self.nCable
         matA_size = mem_block + bend_block + cable_block + ghost_block
         max_weight = np.max((np.max(self.mem_weight_list), np.max(self.bending_weight_list)))
-        self.weight_cable = 10 * max_weight
-        self.weight_ghost = 10 * max_weight
+        self.weight_cable = 50 * max_weight
+        self.weight_ghost = 50 * max_weight
         self.nNeighbour_list = []
         for i in range(self.num_vertices):
             self.nNeighbour_list.append(len(self.neighbour_list[i]))
@@ -459,7 +534,46 @@ class C_SRS_fixedEnd:
                 Bmat[3*i+k, i] = self.weight_cable * cable_vec_rotated[k]
         J = self.K_CG @ Bmat
         return J
-        
+    
+    def get_CG_Jacobian_EE(self, vertices, ghost_vertices=None):
+        if vertices.shape[0] != self.num_vertices:
+            vertices = self.q_to_vertices(vertices)
+        if ghost_vertices is None:
+            ghost_vertices = self.get_pp_location_bary(vertices)
+        J = self.get_CG_Jacobian(vertices, ghost_vertices)
+        ee_idx = self.ee_idx[0]
+        J_ee = J[3*ee_idx:3*ee_idx+3, :]
+        return J_ee
+    
+    def get_FD_Jacobian_EE(self, Q,  delta=1e-3):
+        if Q.shape[0] != 3 * self.num_vertices:
+            Q = self.vertices_to_q(Q)
+        vertices = self.q_to_vertices(Q)
+        cur_cl = self.get_cable_length_bary(vertices)
+        J = np.zeros((3, self.nCable))
+        ee_idx = self.ee_idx[0]
+        for i in range(self.nCable):
+            cl_plus = cur_cl.copy()
+            cl_minus = cur_cl.copy()
+            cl_plus[i] += delta
+            cl_minus[i] -= delta
+            Q_list_plus, tension_plus = self.FKD_static_length(vertices, cl_plus)
+            Q_list_minus, tension_minus = self.FKD_static_length(vertices, cl_minus)
+            vert_plus = self.q_to_vertices(Q_list_plus[-1])
+            vert_minus = self.q_to_vertices(Q_list_minus[-1])
+            cl_plus_final = self.get_cable_length_bary(vert_plus)
+            cl_minus_final = self.get_cable_length_bary(vert_minus)
+            delta_cl = cl_plus_final[i] - cl_minus_final[i] 
+            Q_ee_plus = vert_plus[ee_idx]
+            Q_ee_minus = vert_minus[ee_idx]
+            for j in range(3):
+                if abs(delta_cl) < 1e-8:
+                    J[j, i] = 0.0
+                else:
+                    J[j, i] = (Q_ee_plus[j] - Q_ee_minus[j]) / delta_cl
+        return J
+
+
     def deform_CG(self, tar_cable_length, starting_vertices, max_iter = 300, tol = 1e-8):
         cur_vertices = starting_vertices.copy()
         cur_q = self.vertices_to_q(starting_vertices)
@@ -595,7 +709,7 @@ class C_SRS_fixedEnd:
         Q_list = [Q_a.copy()]
         gravity_tilde = self.q_to_q_moving(self.gravity_vec)
         max_iter = 500
-        tol = 1e-7
+        tol = 1e-6
 
         for iteration in range(max_iter):
             _, R_list_1818 = self.get_R_list(self.q_to_vertices(Q_a))
@@ -636,7 +750,116 @@ class C_SRS_fixedEnd:
 
         return Q_list
 
+    def FKD_static(self, starting_vertices, cable_tension, tol = 1e-6, show_info = False):
+        """Solve the gravity-only corotational equilibrium on moving vertices."""
+        if starting_vertices.shape[0] == 3*self.num_vertices:
+            Q_a = starting_vertices.copy()
+        elif starting_vertices.shape[0] == self.num_vertices:
+            Q_a = self.vertices_to_q(starting_vertices)
+        Q_list = [Q_a.copy()]
+        gravity_tilde = self.q_to_q_moving(self.gravity_vec)
+        max_iter = 500
+        H_mat = np.zeros((self.nCable, 3*self.nMoving))
+        for iteration in range(max_iter):
+            _, R_list_1818 = self.get_R_list(self.q_to_vertices(Q_a))
+            K_tilde, f0_tilde, K_tilde_vec2add = self.assemble_K_tilde(R_list_1818)
+            H_mat_ori = -self.get_cable_Jacobian_bary(Q_a)
+            for i in range(self.nCable):
+                for j in range(self.nMoving):
+                    idx_all = self.idxMoving_2_idxAll[j]
+                    H_mat[i, j*3:j*3+3] = H_mat_ori[i, idx_all*3:idx_all*3+3]
+            # Moving part of K q = f0 + f_gravity, after moving the
+            # fixed-vertex contribution K_mf q_f to the right-hand side.
+            rhs = f0_tilde + gravity_tilde + K_tilde_vec2add + H_mat.T @ cable_tension
+            try:
+                Q_moving = np.linalg.solve(K_tilde, rhs)
+            except np.linalg.LinAlgError as exc:
+                raise np.linalg.LinAlgError(
+                    "The reduced stiffness matrix is singular; check that the "
+                    "fixed region removes all rigid-body modes."
+                ) from exc
 
+            Q_next = self.q_moving_to_q(Q_moving)
+            diff = np.linalg.norm(Q_next - Q_a) / (3*self.nMoving)
+            Q_a = Q_next
+            Q_list.append(Q_a.copy())
+
+            if show_info:
+                residual = np.linalg.norm(K_tilde @ Q_moving - rhs)
+                print(
+                    f"static iteration {iteration + 1}: diff = {diff:.7e}, "
+                    f"linear residual = {residual:.7e}"
+                )
+            if diff < tol:
+                if show_info:
+                    print(f"Static solve converged in {iteration + 1} iterations.")
+                break
+        else:
+            if show_info:
+                print(
+                    f"Static solve reached {max_iter} iterations without "
+                    f"meeting the tolerance (last diff = {diff:.7e})."
+                )
+
+        return Q_list
+
+    def FKD_static_length(self, starting_vertices, target_cable_length, tol = 1e-6, show_info = False):
+        if starting_vertices.shape[0] == 3*self.num_vertices:
+            Q_a = starting_vertices.copy()
+        elif starting_vertices.shape[0] == self.num_vertices:
+            Q_a = self.vertices_to_q(starting_vertices)
+        Q_list = [Q_a.copy()]
+        gravity_tilde = self.q_to_q_moving(self.gravity_vec)
+        max_iter = 500
+        phi_Qfree = np.zeros((self.nCable, 1))
+        H_free = np.zeros((self.nCable, 3*self.nMoving))
+        for iteration in range(max_iter):
+            _, R_list_1818 = self.get_R_list(self.q_to_vertices(Q_a))
+            K_tilde, f0_tilde, K_tilde_vec2add = self.assemble_K_tilde(R_list_1818)
+            lu, piv = lu_factor(K_tilde)
+            Q_moving_free = lu_solve((lu, piv), f0_tilde + gravity_tilde + K_tilde_vec2add)
+            Q_free = self.q_moving_to_q(Q_moving_free)
+            cl_free = self.get_cable_length_bary(Q_free)
+            for i in range(self.nCable):
+                phi_Qfree[i] = target_cable_length[i] - cl_free[i]
+            H_mat_ori = -self.get_cable_Jacobian_bary(Q_free)
+            for i in range(self.nCable):
+                for j in range(self.nMoving):
+                    idx_all = self.idxMoving_2_idxAll[j]
+                    H_free[i, j*3:j*3+3] = H_mat_ori[i, idx_all*3:idx_all*3+3]
+
+            Z1 = lu_solve((lu, piv), H_free.T)                   # (3n, nCable)
+            # lcp_Mmat = h * H_free @ self.W_mat @ A_inv @ H_free.T
+            lcp_Mmat =  H_free @ Z1
+
+            lcp_q = phi_Qfree.reshape((self.nCable,))
+            cable_tension = projected_gauss_seidel_lcp(lcp_Mmat, lcp_q)
+            Q_moving_cor = lu_solve((lu, piv), H_free.T @ cable_tension)
+            Q_moving = Q_moving_free + Q_moving_cor
+            Q_next = self.q_moving_to_q(Q_moving)
+            diff = np.linalg.norm(Q_next - Q_a) / (3*self.nMoving)
+            Q_a = Q_next
+            Q_list.append(Q_a.copy())
+            rhs = f0_tilde + gravity_tilde + K_tilde_vec2add + H_free.T @ cable_tension
+
+            if show_info:
+                residual = np.linalg.norm(K_tilde @ Q_moving - rhs)
+                print(
+                    f"static iteration {iteration + 1}: diff = {diff:.7e}, "
+                    f"linear residual = {residual:.7e}"
+                )
+            if diff < tol:
+                if show_info:
+                    print(f"Static solve converged in {iteration + 1} iterations.")
+                break
+        else:
+            if show_info:
+                print(
+                    f"Static solve reached {max_iter} iterations without "
+                    f"meeting the tolerance (last diff = {diff:.7e})."
+                )
+
+        return Q_list, cable_tension
 
     def IKD_single(self, target_ee_pos, starting_vertices, AA = False, tol = 1e-3):
         idx_ee = self.ee_idx[0]
@@ -671,13 +894,21 @@ class C_SRS_fixedEnd:
                 cl_minus = cur_cl.copy()
                 cl_plus[i] += eps
                 cl_minus[i] -= eps
-                Q_plus_list, vert_plus, cable_tension_plus = self.FKD_time(cl_plus, 1, Q_a)
-                Q_minus_list, vert_minus, cable_tension_minus= self.FKD_time(cl_minus, 1, Q_a)
+                Q_plus_list, cable_tension_plus = self.FKD_static_length(Q_a, cl_plus)
+                Q_minus_list, cable_tension_minus= self.FKD_static_length(Q_a, cl_minus)
+                vert_plus = self.q_to_vertices(Q_plus_list[-1])
+                vert_minus = self.q_to_vertices(Q_minus_list[-1])
+                cl_plus = self.get_cable_length_bary(vert_plus)
+                cl_minus = self.get_cable_length_bary(vert_minus)
+                cl_diff = cl_plus[i] - cl_minus[i]
                 ee_pos_plus = self.get_ee_pos(vert_plus)
                 ee_pos_minus = self.get_ee_pos(vert_minus)
                 diff_plus = 1/2 * np.linalg.norm(ee_pos_plus - target_ee_pos) ** 2
                 diff_minus = 1/2 * np.linalg.norm(ee_pos_minus - target_ee_pos) ** 2
-                Jac[i] = (diff_plus - diff_minus) / (2*eps)
+                if abs(cl_diff) < 1e-8:
+                    Jac[i] = 0.0
+                else:
+                    Jac[i] = (diff_plus - diff_minus) / (2*eps)
             return Jac
         
         def get_jacobian_fd_cg(Q_a, eps = 1e-4):
@@ -700,16 +931,23 @@ class C_SRS_fixedEnd:
                 Jac[i] = (diff_plus - diff_minus) / cl_diff
             return Jac
 
-
+        tol_fd = 3e-3
         cur_length = self.get_cable_length_bary(Q)
-        Q_list, starting_vertices, cable_tension = self.FKD_time(cur_length, 1, starting_vertices)
+        Q_list, cable_tension = self.FKD_static_length(starting_vertices,cur_length)
+        starting_vertices = self.q_to_vertices(Q_list[-1])
         Q = self.vertices_to_q(starting_vertices)
         Q_list_final = [Q.copy()]
         for i in range(max_iter):
             dl = 0.5
-            jac = get_jacobian(Q)
-            # jac = get_jacobian_fd(Q)
+            
             diff = get_diff(Q)
+            diff_cart = 2*np.sqrt(diff)
+            if diff > tol_fd:
+                jac = get_jacobian(Q)
+            else:
+                jac = get_jacobian_fd(Q)
+            # jac = get_jacobian_fd(Q)
+            diff_foreach = diff/self.nCable
             cur_length = self.get_cable_length_bary(Q)
             cmd_diff = [0 for _ in range(self.nCable)]
             cmd_length = cur_length.copy()
@@ -719,11 +957,13 @@ class C_SRS_fixedEnd:
                 if cable_tension[k] < 1e-5 and jac[k] < 0:
                     cmd_diff[k] = 0
                 else:
+                    # cmd_diff[k] = -diff_foreach / jac[k]
                     cmd_diff[k] = -dl * jac[k]
-            cmd_diff = clamp_diff(cmd_diff, min_bound = 1e-3, max_bound = 5e-3)
+            cmd_diff = clamp_diff(cmd_diff, min_bound = 1e-4, max_bound = 5e-3)
             for k in range(self.nCable):
                 cmd_length[k] += cmd_diff[k]
-            Q_list, starting_vertices, cable_tension = self.FKD_time(cmd_length, 1, Q, tol = 1e-5)
+            Q_list, cable_tension = self.FKD_static_length(Q, cmd_length)
+            starting_vertices = self.q_to_vertices(Q_list[-1])
             Q = self.vertices_to_q(starting_vertices)
             diff = get_diff(Q)
             if AA:
@@ -745,7 +985,7 @@ class C_SRS_fixedEnd:
                     Q_list, starting_vertices, cable_tension = self.FKD_time(cl_cmd_next, 1, Q, tol = 1e-5)
                     Q = self.vertices_to_q(starting_vertices)
             diff = np.sqrt(2*diff)
-            print("Iteration {}: diff = {}, dl = {}, Jacobian: {}, cmd_diff: {}".format(i, diff, dl, np.round(jac, 5), np.round(cmd_diff, 5)))
+            # print("Iteration {}: diff = {}, dl = {}, Jacobian: {}, cmd_diff: {}".format(i, diff, dl, np.round(jac, 5), np.round(cmd_diff, 5)))
             # self.visualize_IKD_result(self.q_to_vertices(Q), target_ee_pos)
             Q_list_final.append(Q.copy())
             if diff < tol:
@@ -1143,6 +1383,9 @@ class C_SRS_fixedEnd:
         return cable_Jacobian
 
     def visualize_vert(self, vertices):
+        if vertices.shape[0] != self.num_vertices:
+            vertices = self.q_to_vertices(vertices)
+
         mesh = pv.PolyData(vertices, np.hstack((np.full((self.mesh_triangles.shape[0], 1), 3), self.mesh_triangles)))
 
         plotter = pv.Plotter()
@@ -1181,9 +1424,58 @@ class C_SRS_fixedEnd:
         plotter.add_points(fb_vertices[self.ee_idx], color='magenta', point_size=10, label='FB EE Vertices')
         plotter.add_points(vertices[self.fixed_idx], color='black', point_size=10, label='Fixed Vertices')
         plotter.show_grid()
+        filtered_region = [-0.02, 0.3, 0, 0.16, -0.02, 0.02]
+        xmin = -0.02 
+        xmax = 0.3
+        ymin = 0
+        ymax = 0.16
+        zmin = -0.1
+        zmax = 0.1
+        plotter.add_points(np.array([[xmin, ymin, zmin], [xmax, ymax, zmax]]), color='white', point_size=0.1, label='Axis Limits')
+
         plotter.show_axes()
         plotter.add_legend()
         plotter.show()
+
+    def visualize_fb_surface_w_gt(self, vertices, gt_pts):
+        if vertices.shape[0] != self.num_vertices:
+            vertices = self.q_to_vertices(vertices)
+        
+        # make plotter offscreen
+        plotter = pv.Plotter(off_screen=True)
+        fb_vertices = self.get_fb_surface(vertices)
+        vertices = vertices*1e3
+        fb_vertices = fb_vertices*1e3
+        gt_pts = gt_pts*1e3
+        faces = np.hstack((np.full((self.mesh_triangles.shape[0], 1), 3), self.mesh_triangles))
+        mesh_surface = pv.PolyData(vertices, faces)
+        mesh_fb = pv.PolyData(fb_vertices, faces)
+        plotter.add_mesh(mesh_surface, color='lightblue', show_edges=True, opacity=0.95, label='Input Surface')
+        plotter.add_mesh(mesh_fb, color='lightgrey', show_edges=True, opacity=0.35, label='FB Mid-Surface')
+        # plotter.add_points(fb_vertices[self.ee_idx], color='magenta', point_size=10, label='FB EE Vertices')
+        # plotter.add_points(vertices[self.fixed_idx], color='black', point_size=10, label='Fixed Vertices')
+        plotter.add_points(gt_pts, color='green', point_size=10, opacity=0.55, label='Ground Truth Points')
+        plotter.show_grid()
+        plotter.show_axes()
+        # plotter.add_legend()
+        # set viewpoint
+        plotter.view_vector((2, 2, 2))
+        plotter.camera.zoom(0.7)
+        # plotter.camera.zoom(0.5)
+
+        # make axis equal
+        filtered_region = [-0.02, 0.3, 0, 0.16, -0.02, 0.02]
+        xmin =1e3* -0.02 
+        xmax =1e3* 0.3
+        ymin =1e3* 0
+        ymax =1e3* 0.16
+        zmin =1e3* -0.1
+        zmax =1e3* 0.1
+        # add ghost point at (xmin, ymin, zmin) and (xmax, ymax, zmax) to set the axis limits
+        plotter.add_points(np.array([[xmin, ymin, zmin], [xmax, ymax, zmax]]), color='white', point_size=0.1, label='Axis Limits')
+        # plotter.show()
+        return plotter
+
 
     def visualize_IKD_result(self, vertices, target_ee_pos):
         mesh = pv.PolyData(vertices, np.hstack((np.full((self.mesh_triangles.shape[0], 1), 3), self.mesh_triangles)))
@@ -1468,8 +1760,15 @@ if __name__ == "__main__":
     description_file = "./models/flat_tri_surface/C_SRS_description_bary.pkl"
     c_srs = C_SRS_fixedEnd(description_file)
     icl = c_srs.initial_cable_length.copy()
-    Q_list = c_srs.FKD_free_static(1)
-    c_srs.visualize_fb_surface(c_srs.q_to_vertices(Q_list[-1]))
+    # tcl = [icl[0]+0.1, icl[1]+0.1, icl[2]-0.04, icl[3]+0.1, icl[4]-0.01, icl[5]+0.1]
+    Q_list = c_srs.FKD_static(c_srs.vertices, [1,1,1,1,1,1],tol = 1e-6, show_info = True)
+    c_srs.visualize_vert(Q_list[-1])
+    cl_final = c_srs.get_cable_length_bary(Q_list[-1])
+    Q_list, cable_tension = c_srs.FKD_static_length(c_srs.vertices, cl_final, tol = 1e-6, show_info = True)
+    c_srs.visualize_vert(Q_list[-1])
+    print("cable tension: ", cable_tension)
+    # Q_list = c_srs.FKD_free_static(1)
+    # c_srs.visualize_fb_surface(c_srs.q_to_vertices(Q_list[-1]))
     # c_srs.replay_Q_list(Q_list, "./c_srs_free_static.mp4")
     exit(0)
     # cl_range_1 = [[icl[0]-0.08, icl[0]-0.02], 

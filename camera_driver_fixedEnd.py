@@ -817,8 +817,11 @@ if __name__ == "__main__":
     # print("Calibrated transformations:")
     # print(transformations)
     points = np.array([[0.27,0.08,0.025],[0.02, 0.0, 0.0], [0.02, 0.08, 0.0], [0.02, 0.16, 0.0]])
-    pcd, geometries= camera.draw_points_depth(points, region=filtered_region)
-
+    # pcd, geometries= camera.draw_points_depth(points, region=filtered_region)
+    # draw points in rgb
+    annotated, pixels, valid_mask = camera.draw_points(points)
+    # cv2.imshow("Annotated RGB with projected points", cv2.cvtColor(annotated, cv2.COLOR_RGB2BGR))
+    # cv2.waitKey(0)
 
     
     
