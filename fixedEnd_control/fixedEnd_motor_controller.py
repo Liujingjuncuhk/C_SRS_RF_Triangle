@@ -294,14 +294,14 @@ if __name__ == "__main__":
     # tp[0] += 4000
     # feetech_driver.move_to_position(tp, [500 for _ in range(6)])
 
-    # pos = [2048 for _ in range(6)]
+    pos = [2048 for _ in range(6)]
 
     # feetech_driver.move_to_position(pos, [500 for _ in range(6)])
-    input("Press Enter to return to initial positions...")
+    # input("Press Enter to return to initial positions...")
 
-    # feetech_driver.set_mid()
+    feetech_driver.set_mid()
     time.sleep(0.1)
     print("Reading current positions...")
     pos = feetech_driver.read_positions()
     print("Positions:", pos)
-    feetech_driver.move_to_position(initial_pos, [500 for _ in range(6)])
+    # feetech_driver.move_to_position(initial_pos, [500 for _ in range(6)])

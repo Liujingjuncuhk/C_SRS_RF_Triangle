@@ -1541,7 +1541,8 @@ class C_SRS_fixedEnd:
             vertices = self.q_to_vertices(vertices)
         
         # make plotter offscreen
-        plotter = pv.Plotter(off_screen=True)
+        # plotter = pv.Plotter(off_screen=True)
+        plotter = pv.Plotter()
         fb_vertices = self.get_fb_surface(vertices)
         vertices = vertices*1e3
         fb_vertices = fb_vertices*1e3
@@ -1558,8 +1559,8 @@ class C_SRS_fixedEnd:
         plotter.show_axes()
         # plotter.add_legend()
         # set viewpoint
-        plotter.view_vector((2, 2, 2))
-        plotter.camera.zoom(0.7)
+        # plotter.view_vector((2, 2, 2))
+        # plotter.camera.zoom(0.7)
         # plotter.camera.zoom(0.5)
 
         # make axis equal
@@ -1572,7 +1573,7 @@ class C_SRS_fixedEnd:
         zmax =1e3* 0.1
         # add ghost point at (xmin, ymin, zmin) and (xmax, ymax, zmax) to set the axis limits
         plotter.add_points(np.array([[xmin, ymin, zmin], [xmax, ymax, zmax]]), color='white', point_size=0.1, label='Axis Limits')
-        # plotter.show()
+        plotter.show()
         return plotter
 
 
@@ -1920,6 +1921,7 @@ if __name__ == "__main__":
     description_file = "./models/flat_tri_surface/C_SRS_description_bary.pkl"
     c_srs = C_SRS_fixedEnd(description_file)
     icl = c_srs.initial_cable_length.copy()
+    print("initial cable length: ", icl)
     print("number of vertices: ", c_srs.num_vertices)
     print("")
     c_srs.visualize_vert(c_srs.vertices)

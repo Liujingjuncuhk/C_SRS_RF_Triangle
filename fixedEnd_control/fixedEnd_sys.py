@@ -14,7 +14,8 @@ except ImportError:
     from fixedEnd_motor_controller import FeetechUDPDriver
 
 class FixedEndSystem:
-    def __init__(self, description_file: str):
+    def __init__(self, description_file: str = "./models/flat_tri_surface/C_SRS_description_bary.pkl"
+):
         """
         Initialize the FixedEndSystem with a description file.
 
@@ -30,11 +31,11 @@ class FixedEndSystem:
         self.camera = FixedEndCamera()
         self.nCable = 6
         self.calibrated_motor_pos = [2048 for _ in range(self.nCable)]  # Default calibrated positions
-        self.calibrated_cable_length = (np.array([43.5, 45.5, 44.8, 29.0, 27.2, 28.5])*1e-3).tolist()  # Default calibrated lengths in meters
+        self.calibrated_cable_length = (np.array([437, 448, 442, 292, 272, 287])*1e-3).tolist()  # Default calibrated lengths in meters
         self.default_speed = 0.01
         self.stepPerm = 4096/(0.05*np.pi)
         self.mPerStep = 1/self.stepPerm
-        self.moving_dir = [1, 1, 1, 1, 1, 1]  # Direction for each motor
+        self.moving_dir = [1, 1, 1, -1, -1, -1]  # Direction for each motor
 
     def _as_cable_vector(self, values, name: str) -> np.ndarray:
         values = np.asarray(values, dtype=float).reshape(-1)
@@ -91,6 +92,7 @@ class FixedEndSystem:
         current_lengths = np.asarray(self.get_cur_length(), dtype=float)
         speed = np.abs(target_lengths - current_lengths) / consumed_time
         self.move_to_length(target_lengths.tolist(), speed.tolist())
+        time.sleep(consumed_time)
 
     def move_length_rel_timed(self, length_diffs: list, consumed_time: float):
         """
@@ -210,4 +212,13 @@ class FixedEndSystem:
 
     
 if __name__ == "__main__":
-    pass
+    filtered_region = [0.02, 0.3, 0, 0.16, -0.02, 0.02]
+    fixedEnd_sys = FixedEndSystem()
+    cl = fixedEnd_sys.get_cur_length()
+    print("initial cl is: ", cl)
+    Q_list, tension= fixedEnd_sys.c_srs.FKD_static_length(fixedEnd_sys.c_srs.vertices, cl)
+    pcd = fixedEnd_sys.camera.get_depth_pointcloud(region = filtered_region)
+    pts_points = np.asarray(pcd.points)
+    vert_initial = fixedEnd_sys.c_srs.q_to_vertices(Q_list[-1])
+    plotter = fixedEnd_sys.c_srs.visualize_fb_surface_w_gt(vert_initial, pts_points)
+    # plotter.show()

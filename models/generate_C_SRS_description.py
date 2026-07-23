@@ -9,14 +9,14 @@ import ezdxf
 DXF_PATH = "./models/flat_tri_surface/flat_tri_surface.DXF"
 MAX_AREA = 100   # max triangle area in DXF units² (mm²); lower = finer mesh
 thickness = 0.005 # meter
-Youngs_modulus = 4.2e6 # Pa
-Poisson_ratio = 0.3
+Youngs_modulus = 3.57e7 # Pa
+Poisson_ratio = 0.39
 density = 961 # kg/m^3
 
 folder = "./models/flat_tri_surface/"
 
 pullpoint_locations = np.array([[215, 10, 2.5], [250,80,2.5], [215, 150, 2.5], [180, 10, -2.5], [145, 80, -2.5], [180, 150,-2.5]]) * 1e-3
-pulley_locations = np.array([[30, 10, 402.5], [30, 80, 402.5], [30, 150, 402.5], [10, 10, -256.5], [10, 80, -256.5], [10, 150, -256.5]]) * 1e-3
+pulley_locations = np.array([[30, 10, 402.5], [30, 80, 402.5], [30, 150, 402.5], [30, 10, -256.5], [30, 80, -256.5], [30, 150, -256.5]]) * 1e-3
 # pulley_locations[:,2] += 0.025
 ee_vertices_list = np.array([[270, 80, 0]]) * 1e-3
 
@@ -731,7 +731,7 @@ def generate_C_SRS_description(mesh_vertices, mesh_triangles, pullpoint_location
         stiffness_matrices.append(K)
     mass_mat = cal_mass_matrix(mesh_vertices, mesh_triangles, density, thickness)
     visualize_3d_mesh(mesh_vertices, mesh_triangles, pp_idx, pulley_locations, ee_idx)
-    with open(folder + "C_SRS_description.pkl", "wb") as f:
+    with open(folder + "C_SRS_description_bary.pkl", "wb") as f:
         pickle.dump({
             "mesh_vertices": mesh_vertices,
             "mesh_triangles": mesh_triangles,

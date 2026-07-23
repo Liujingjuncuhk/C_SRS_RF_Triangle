@@ -291,6 +291,8 @@ class FixedEndCamera:
             np.asarray(extr.translation, dtype=np.float64),
         )
         self.T_rgb_to_depth = _invert_T(self.T_depth_to_rgb)
+        time.sleep(3)
+        print("camera initialized!")
 
     def read(self, timeout_ms: int = 5000) -> tuple[np.ndarray | None, np.ndarray | None]:
         """Read one RGB frame and one depth frame.
