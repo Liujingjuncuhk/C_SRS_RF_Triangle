@@ -862,6 +862,9 @@ class C_SRS_fixedEnd:
 
         return Q_list, cable_tension
 
+    def FKD_trajectory(self, cl_list, time_list):
+        pass
+
     def IKD_single(self, target_ee_pos, starting_vertices, AA = False, tol = 1e-3):
         idx_ee = self.ee_idx[0]
         idx_ee_moving = self.idxAll_2_idxMoving[idx_ee]
@@ -1005,7 +1008,8 @@ class C_SRS_fixedEnd:
         data_list = []
         for i in range(len(cl_to_test)):
             cl = cl_to_test[i]
-            Q_list, vert_length, cable_tension = self.FKD_time(cl, 1, self.vertices)
+            Q_list, cable_tension = self.FKD_static_length(self.vertices, cl)
+            vert_length = self.q_to_vertices(Q_list[-1])
             fcl = self.get_cable_length_bary(vert_length)
             ee_pos = self.get_ee_pos(vert_length)
             print("Test {}: cable length {}, ee pos {}".format(i, np.round(fcl, 3), np.round(ee_pos, 3)))
@@ -1112,6 +1116,100 @@ class C_SRS_fixedEnd:
                     break
         vert_fixEE = self.q_to_vertices(Q_a)
         return vert_fixEE
+
+    def get_fixedEE_guess_vertices(self, target_EE_pos):
+        """Return a static FEM shape with the end effector fixed at ``target_EE_pos``.
+
+        The vertices in ``self.fixed_idx`` remain at their reference positions and
+        the first end-effector vertex is prescribed at the requested position.  All
+        remaining degrees of freedom are found from a corotational FEM equilibrium
+        under gravity.  This is intended as a mechanically plausible initial guess
+        for inverse kinematics; cable forces are deliberately not included.
+
+        Parameters
+        ----------
+        target_EE_pos : array_like, shape (3,)
+            Desired world position of the end-effector vertex.
+
+        Returns
+        -------
+        numpy.ndarray, shape (num_vertices, 3)
+            The complete deformed mesh.  The returned EE position is exactly the
+            supplied target (up to its conversion to floating point).
+        """
+        target = np.asarray(target_EE_pos, dtype=float)
+        if target.size != 3:
+            raise ValueError("target_EE_pos must contain exactly three coordinates.")
+        target = target.reshape(3)
+        if not np.all(np.isfinite(target)):
+            raise ValueError("target_EE_pos must contain only finite values.")
+
+        ee_idx = int(np.asarray(self.ee_idx).reshape(-1)[0])
+        if ee_idx in self.fixed_idx:
+            raise ValueError(
+                "The end-effector vertex is also in fixed_idx, so it cannot be "
+                "prescribed independently."
+            )
+
+        constrained_vertices = np.asarray(
+            list(dict.fromkeys([int(i) for i in self.fixed_idx] + [ee_idx])),
+            dtype=int,
+        )
+        constrained_dofs = (
+            3 * constrained_vertices[:, None] + np.arange(3)[None, :]
+        ).reshape(-1)
+        all_dofs = np.arange(3 * self.num_vertices)
+        free_dofs = np.setdiff1d(all_dofs, constrained_dofs, assume_unique=True)
+
+        q = self.vertices_to_q(self.vertices.copy()).astype(float, copy=False)
+        q[3 * ee_idx:3 * ee_idx + 3] = target
+        prescribed_q = q[constrained_dofs].copy()
+
+        # This routine supplies an initial guess, so use a modest iteration cap.
+        # Relaxation suppresses the oscillation that a raw corotational fixed-point
+        # iteration can exhibit for targets far from the reference configuration.
+        max_iter = 20
+        tol = 1e-6
+        relaxation = 0.7
+        for _ in range(max_iter):
+            _, rotations = self.get_R_list(self.q_to_vertices(q))
+            stiffness, rest_force = self.assemble_K(rotations)
+            rhs = (
+                rest_force[free_dofs]
+                + self.gravity_vec[free_dofs]
+                - stiffness[np.ix_(free_dofs, constrained_dofs)] @ prescribed_q
+            )
+            stiffness_free = sp.csc_matrix(
+                stiffness[np.ix_(free_dofs, free_dofs)]
+            )
+            try:
+                q_free = spla.spsolve(stiffness_free, rhs)
+            except (RuntimeError, ValueError) as exc:
+                raise np.linalg.LinAlgError(
+                    "The fixed-EE FEM system is singular; check the fixed region "
+                    "and mesh connectivity."
+                ) from exc
+            if not np.all(np.isfinite(q_free)):
+                raise np.linalg.LinAlgError(
+                    "The fixed-EE FEM system produced a non-finite solution; "
+                    "check the fixed region and mesh connectivity."
+                )
+
+            q_next = q.copy()
+            q_next[free_dofs] = (
+                (1.0 - relaxation) * q[free_dofs] + relaxation * q_free
+            )
+            q_next[constrained_dofs] = prescribed_q
+            diff = np.linalg.norm(q_next - q) / max(1, free_dofs.size)
+            q = q_next
+            if diff < tol:
+                break
+
+        return self.q_to_vertices(q)
+
+    def get_fixedEE_guess_vertives(self, target_EE_pos):
+        """Backward-compatible alias for the originally requested misspelling."""
+        return self.get_fixedEE_guess_vertices(target_EE_pos)
 
     def get_fixed_idx(self, vertices, fixed_region):
         self.fixed_idx = []
@@ -1732,7 +1830,68 @@ class C_SRS_fixedEnd:
 
         plotter.close()
 
+    def replay_IKD_trajectory(self, ee_target_pos, vert_list, filePath="./fixedEnd_IKD_traj.mp4", framerate = 30):
+        window_size=(1024, 768)
+        plotter = pv.Plotter(off_screen=True, window_size=window_size)
 
+        vertices0 = vert_list[0]
+        faces = np.hstack((np.full((self.mesh_triangles.shape[0], 1), 3), self.mesh_triangles))
+
+        # Build all actors once; update .points in-place each frame
+        surf = pv.PolyData(vertices0.copy(), faces)
+        plotter.add_mesh(surf, color='lightgray', show_edges=True)
+
+        pp_location = self.get_pp_location_bary(vertices0)
+        pp_cloud = pv.PolyData(pp_location.copy())
+        plotter.add_mesh(pp_cloud, color='blue', point_size=10,
+                         render_points_as_spheres=True, label='Pull points')
+
+        pulley_cloud = pv.PolyData(self.pulley_location.copy())
+        plotter.add_mesh(pulley_cloud, color='cyan', point_size=10,
+                         render_points_as_spheres=True, label='Pulleys')
+
+        ee_cloud = pv.PolyData(vertices0[self.ee_idx].copy())
+        plotter.add_mesh(ee_cloud, color='red', point_size=10,
+                         render_points_as_spheres=True, label='End Effectors')
+        
+        fixed_cloud = pv.PolyData(vertices0[self.fixed_idx].copy())
+        plotter.add_mesh(fixed_cloud, color='black', point_size=10,
+                         render_points_as_spheres=True, label='Fixed Vertices')
+
+        cable_pts = np.empty((2 * self.nCable, 3))
+        for i in range(self.nCable):
+            cable_pts[2 * i]     = pp_location[i]
+            cable_pts[2 * i + 1] = self.pulley_location[i]
+        cable_lines = np.array([[2, 2 * i, 2 * i + 1]
+                                 for i in range(self.nCable)]).flatten()
+        cables = pv.PolyData()
+        cables.points = cable_pts.copy()
+        cables.lines = cable_lines
+        plotter.add_mesh(cables, color='blue', line_width=2)
+
+        # add ee target pos as line segment
+        nTarget = len(ee_target_pos)
+        for i in range(nTarget-1):
+            plotter.add_lines(np.array([ee_target_pos[i], ee_target_pos[i+1]]), color='green', width=2)
+        plotter.add_lines(np.array([ee_target_pos[-1], ee_target_pos[0]]), color='green', width=2)
+
+        plotter.show_grid()
+        plotter.show_axes()
+        plotter.add_legend()
+        plotter.open_movie(filePath, framerate=framerate)
+
+        for vertices in vert_list:
+            surf.points = vertices.copy()
+            pp_locations = self.get_pp_location_bary(vertices)
+            pp_cloud.points = pp_locations.copy()
+            ee_cloud.points = vertices[self.ee_idx].copy()
+            fixed_cloud.points = vertices[self.fixed_idx].copy()
+            for i in range(self.nCable):
+                cable_pts[2 * i] = pp_locations[i]
+            cables.points = cable_pts.copy()
+            plotter.write_frame()
+
+        plotter.close()
 
 class IK_MLP(nn.Module):
     def __init__(self, dropout=0.1):
@@ -1790,7 +1949,7 @@ if __name__ == "__main__":
     #             [icl[4]-0.04, icl[4]+0.01],
     #             [icl[5]-0.04, icl[5]+0.01]]
     # c_srs.generate_ws(cl_range_1, total_number=1000, saveFile='training_data_1.pkl')
-    # c_srs.generate_ws(cl_range_2, total_number=1000, saveFile='training_data_2.pkl')
+    c_srs.generate_ws(cl_range_2, total_number=1000, saveFile='training_data_2.pkl')
     # exit(0)
     tcl = [icl[0]+0.1, icl[1]+0.1, icl[2]-0.04, icl[3]+0.1, icl[4]-0.01, icl[5]+0.1]
     Q_list, vert_length, cable_tension = c_srs.FKD_time(tcl, 1, c_srs.vertices, tol = 1e-4, show_info = True)

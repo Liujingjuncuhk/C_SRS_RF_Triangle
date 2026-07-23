@@ -1,3 +1,4 @@
+import matplotlib
 import torch
 import torch.nn as nn
 import numpy as np
@@ -14,6 +15,7 @@ parentdir = os.path.dirname(currentdir)
 sys.path.insert(0, parentdir) 
 from C_SRS_fixedEnd import C_SRS_fixedEnd, IK_MLP
 import pickle
+import matplotlib.pyplot as plt
 
 def dense_ee_target(ee_target_list, nSamples):
     """Return ``nSamples`` points evenly spaced along the full waypoint path."""
@@ -38,36 +40,35 @@ def dense_ee_target(ee_target_list, nSamples):
         )
     return dense_targets
 
+def draw_cl_cmd(length_cmd_list):
+    # length_cmd_list is a list of list, draw for each element
+    cl = [[] for _ in range(6)]
+    for length_cmd in length_cmd_list:
+        for i in range(6):
+            cl[i].append(length_cmd[i])
+    # use subfigures
+    plt.figure(figsize=(10, 6))
+    for i in range(6):
+        plt.plot(cl[i], label=f"Cable {i+1}")
+
+    plt.xlabel("Time step")
+    plt.ylabel("Cable length command")
+    plt.title("Cable length command over time")
+    plt.grid()
+    plt.legend()
+    plt.show()
+
 if __name__ == "__main__":
     description_file = "./models/flat_tri_surface/C_SRS_description_bary.pkl"
     c_srs = C_SRS_fixedEnd(description_file)
-    ee_target_list = np.array([[0.26, 0.08, 0.03],
-                               [0.25, 0.08, 0.07],
-                               [0.22, 0.08, 0.08],
-                               [0.23, 0.08, 0.04],
-                               [0.26, 0.08, 0.03]]) # parallelogram
+    picklefile = "./data/IKD_traj_result.pkl"
+    with open(picklefile, "rb") as f:
+        traj_result = pickle.load(f)
+    ee_target_list = traj_result['target_list']
+    length_cmd_list = traj_result['length_cmd_list']
+    # draw the length cmd list using matplotlib
+    draw_cl_cmd(length_cmd_list)
 
-    # ee_target_list = np.array([[0.26, 0.08, 0.03],
-    #                            [0.24, 0.06, 0.07],
-    #                            [0.24, 0.1, 0.07],
-    #                            [0.26, 0.08, 0.03]]) # triangle
-    dense_targets = dense_ee_target(ee_target_list, nSamples=60)
-    # ee_target_list = np.array([[0.25, 0.08, 0.02]])
-    c_srs.visualize_planned_traj(c_srs.vertices, ee_target_list)
-    # exit(0)
-    length_cmd_list = []
-    vert_list = []
-    starting_vert = c_srs.vertices
-    for i in range(dense_targets.shape[0]):
-        ee_target = dense_targets[i]
-        # if i == 0:
-        tcl = c_srs.ikModel.predict_cable_length(ee_target)
-        Q_list, cable_tension = c_srs.FKD_static_length(starting_vert, tcl)
-        starting_vert = c_srs.q_to_vertices(Q_list[-1])
-        cur_length, starting_vertices, Q_list = c_srs.IKD_single(ee_target, starting_vert,AA = False, tol=1e-3)
-        length_cmd_list.append(cur_length)
-        vert_list.append(starting_vertices)
-    # save the length_cmd_list and vert_list to a pickle file
-    dump_data = {'target_list': dense_targets, 'length_cmd_list': length_cmd_list, 'vert_list': vert_list}
-    with open('data/IKD_traj_result.pkl', 'wb') as f:
-        pickle.dump(dump_data, f)
+    vert_list = traj_result['vert_list']
+    c_srs.replay_IKD_trajectory(ee_target_list, vert_list, framerate = 20, filePath = "IKD_parallelogram_traj.mp4")
+    

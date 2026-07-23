@@ -52,6 +52,7 @@ class Flying_carpet:
         self.Poisson_ratio = 0.39
         self.density = self.description['density']
         self.density = 619.230769230769
+        self.reassemble_stiffness_matrices(self.Youngs_modulus, self.Poisson_ratio)
         self.ARAP_weight_list = self.description['weight_list']
         self.edge_list = self.description['edge_list']
         self.neighbour_list = self.description['neighbour_list']
@@ -98,7 +99,7 @@ class Flying_carpet:
                         self.N1212[3*i+j, 3*k+j] = -1.0/4.0
         self.N44 = np.eye(4) - 1/4*np.ones((4,4))
         self.N66 = np.eye(6) - 1/6*np.ones((6,6))
-
+        self.get_fixed_idx()
         self.initial_ARAP_shape_list = []
         for i in range(self.num_vertices):
             neighbour_list = self.neighbour_list[i]
@@ -117,6 +118,145 @@ class Flying_carpet:
             for j in range(3):
                 self.W_mat[3*i+j, 3*i+j] = 1 / self.mass_matrix[3*i+j, 3*i+j]
         self.assemble_CG_matrices()
+
+    def get_fixed_idx(self):
+        self.fixed_idx = []
+        self.idxFixed_2_idxAll = []
+        self.idxMoving_2_idxAll = []
+        self.idxAll_2_idxMoving = [-1 for _ in range(self.num_vertices)]
+        idx_moving = 0
+        fixed_idx = self.ee_idx.copy()
+        for i in range(self.num_vertices):
+            if i in fixed_idx:
+                self.fixed_idx.append(i)
+                self.idxFixed_2_idxAll.append(i)
+            else:
+                self.idxMoving_2_idxAll.append(i)
+                self.idxAll_2_idxMoving[i] = idx_moving
+                idx_moving += 1
+        self.nMoving = self.num_vertices - len(self.fixed_idx)
+
+
+    def reassemble_stiffness_matrices(self, Youngs_modulus, Poisson_ratio):
+        """Rebuild all EBST element stiffness matrices for new material values."""
+        E = float(Youngs_modulus)
+        nu = float(Poisson_ratio)
+        t = float(self.thickness)
+
+        if not np.isfinite(E) or E <= 0.0:
+            raise ValueError("Youngs_modulus must be a finite positive value.")
+        if not np.isfinite(nu) or not -1.0 < nu < 0.5:
+            raise ValueError("Poisson_ratio must satisfy -1 < nu < 0.5.")
+        if not np.isfinite(t) or t <= 0.0:
+            raise ValueError("thickness must be a finite positive value.")
+
+        tol = 1e-12
+        C = np.array([
+            [1.0, nu, 0.0],
+            [nu, 1.0, 0.0],
+            [0.0, 0.0, (1.0 - nu) / 2.0],
+        ])
+        Dm = E * t / (1.0 - nu**2) * C
+        Db = E * t**3 / (12.0 * (1.0 - nu**2)) * C
+
+        stiffness_matrices = []
+        for element_idx, indices in enumerate(self.mesh_RF_triangles):
+            indices = np.asarray(indices, dtype=int)
+            if np.any(indices[:3] == -1):
+                raise ValueError(
+                    f"Element {element_idx} has a ghost node in its central triangle."
+                )
+
+            # Indexing with -1 is harmless for a ghost slot because that slot is
+            # skipped below and its rows and columns are explicitly zeroed.
+            X = self.vertices[indices]
+            x0, x1, x2 = X[:3]
+            v1, v2 = x1 - x0, x2 - x0
+            normal = np.cross(v1, v2)
+            normal_norm = np.linalg.norm(normal)
+            if normal_norm < tol:
+                raise ValueError(f"Element {element_idx} has a degenerate central triangle.")
+
+            area = 0.5 * normal_norm
+            t3 = normal / normal_norm
+            v1_norm = np.linalg.norm(v1)
+            if v1_norm < tol:
+                raise ValueError(f"Element {element_idx} has a zero-length first edge.")
+            e1 = v1 / v1_norm
+            e2 = np.cross(t3, e1)
+
+            def cst_grad(points):
+                """Return CST shape gradients in the central triangle frame."""
+                u1, u2 = points[1] - points[0], points[2] - points[0]
+                tri_normal = np.cross(u1, u2)
+                twice_area = np.linalg.norm(tri_normal)
+                if twice_area < tol:
+                    return None
+                u1_norm = np.linalg.norm(u1)
+                if u1_norm < tol:
+                    return None
+                f1 = u1 / u1_norm
+                f3 = tri_normal / twice_area
+                f2 = np.cross(f3, f1)
+                local_points = (points - points[0]) @ np.vstack([f1, f2]).T
+                (xa, ya), (xb, yb), (xc, yc) = local_points
+                determinant = (xb - xa) * (yc - ya) - (xc - xa) * (yb - ya)
+                if abs(determinant) < tol:
+                    return None
+                b = np.array([yb - yc, yc - ya, ya - yb]) / determinant
+                c = np.array([xc - xb, xa - xc, xb - xa]) / determinant
+                frame_transform = np.array([
+                    [f1 @ e1, f1 @ e2],
+                    [f2 @ e1, f2 @ e2],
+                ])
+                return np.column_stack([b, c]) @ frame_transform
+
+            dNm = cst_grad(X[:3])
+            if dNm is None:
+                raise ValueError(f"Element {element_idx} has a degenerate central triangle.")
+
+            Bm = np.zeros((3, 18))
+            for local_node in range(3):
+                Na, Nb = dNm[local_node]
+                col = slice(3 * local_node, 3 * local_node + 3)
+                Bm[0, col] = Na * e1
+                Bm[1, col] = Nb * e2
+                Bm[2, col] = Na * e2 + Nb * e1
+
+            Bb = np.zeros((3, 18))
+            side_nodes = ((1, 2, 3), (2, 0, 4), (0, 1, 5))
+            for side, nodes in enumerate(side_nodes):
+                if indices[nodes[2]] == -1:
+                    continue
+                dNi = cst_grad(X[list(nodes)])
+                if dNi is None:
+                    continue
+                NMa, NMb = dNm[side]
+                for local_node, patch_node in enumerate(nodes):
+                    Ta, Tb = dNi[local_node]
+                    coefficients = np.array([
+                        NMa * Ta,
+                        NMb * Tb,
+                        NMa * Tb + NMb * Ta,
+                    ])
+                    col = slice(3 * patch_node, 3 * patch_node + 3)
+                    Bb[:, col] += np.outer(coefficients, t3)
+
+            K = area * (Bm.T @ Dm @ Bm) + area * (Bb.T @ Db @ Bb)
+            for slot, vertex_idx in enumerate(indices):
+                if vertex_idx == -1:
+                    dofs = slice(3 * slot, 3 * slot + 3)
+                    K[dofs, :] = 0.0
+                    K[:, dofs] = 0.0
+            stiffness_matrices.append(K)
+
+        self.stiffness_matrices = stiffness_matrices
+        self.Youngs_modulus = E
+        self.Poisson_ratio = nu
+        self.description['stiffness_matrices'] = stiffness_matrices
+        self.description['Youngs_modulus'] = E
+        self.description['Poisson_ratio'] = nu
+        return self.stiffness_matrices
 
 
     def assemble_CG_matrices(self):
@@ -312,7 +452,7 @@ class Flying_carpet:
                     bVec[idx_row_start+k] += self.weight_ghost * rotated_ghost_shape[j, k]
         return bVec
     
-    def FKD_time(self, target_cable_length, total_time, starting_vertices, tol = 2e-5, show_info = False):
+    def FKD_time(self, target_cable_length, total_time, starting_vertices, tol = 1e-5, show_info = False, h = 0.01):
         if starting_vertices.shape[0] == 3*self.num_vertices:
             Q_a = starting_vertices.copy()
         elif starting_vertices.shape[0] == self.num_vertices:
@@ -322,7 +462,7 @@ class Flying_carpet:
         Q_a = Q_a.reshape((3*self.num_vertices, ))
         Q_ad = np.zeros((3*self.num_vertices, ))
         t_a = 0.0
-        h = 0.01
+        # h = 0.1
         phi_Qfree = np.zeros((self.nCable, 1))
         H_free = np.zeros((self.nCable, 3*self.num_vertices))
         Q_list = [Q_a.copy()]
@@ -373,17 +513,17 @@ class Flying_carpet:
             if diff < tol:
                 diff_count += 1
                 if diff_count >= 10:
-                    print(f"Converged at time {t_a:.2f} with diff {diff:.6f} for 10 consecutive steps, stopping simulation.")
+                    # print(f"Converged at time {t_a:.2f} with diff {diff:.6f} for 10 consecutive steps, stopping simulation.")
                     break
             t3 = time.time()
             if show_info:
                 print(f"t_a: {t_a:.3f}, diff: {diff:.7f}, time for R_list: {t1-t0:.4f}s, time for K_mat: {t2-t1:.4f}s, total time for this step: {t3-t0:.4f}s")
         t_end = time.time()
-        print(f"Total simulation time: {t_end - t_start:.2f}s")
+        # print(f"Total simulation time: {t_end - t_start:.2f}s")
         vert_length = self.q_to_vertices(Q_a)
         return Q_list, vert_length, cable_tension
 
-    def IKD_single(self, target_EE_pos, starting_vertices, tol = 1e-3, max_iter = 500):
+    def IKD_single(self, target_EE_pos, starting_vertices, tol = 1e-3, max_iter = 500, show_info = False, initial_guess = True):
         if starting_vertices.shape[0] == 3*self.num_vertices:
             Q = starting_vertices.copy()
         elif starting_vertices.shape[0] == self.num_vertices:
@@ -404,7 +544,7 @@ class Flying_carpet:
         def get_jacobian(Q):
             ee_poses = self.get_ee_poses(Q)
             Jac_CG = self.get_CG_Jacobian(Q)
-            print("Jac_CG shape: ", Jac_CG.shape)
+            # print("Jac_CG shape: ", Jac_CG.shape)
             Jacobian = np.zeros((self.nCable, ))
             for i in range(self.nCable):
                 for j in range(len(self.ee_idx)):
@@ -413,8 +553,10 @@ class Flying_carpet:
                         Jacobian[i] += (ee_poses[j, k] - target_EE_pos[j, k]) * Jac_CG[3*ee_idx_j+k, i]
             return Jacobian
         
-        cur_length = self.get_cable_length_bary(Q)
-        Q_list, starting_vertices, cable_tension = self.FKD_time(cur_length, 1, starting_vertices, tol = 2e-5)
+        if initial_guess:
+            starting_vertices = self.get_fixedEE_guess_vertices(target_EE_pos)
+            cur_length = self.get_cable_length_bary(starting_vertices)
+            Q_list, starting_vertices, cable_tension = self.FKD_time(cur_length, 1, starting_vertices)
         Q = self.vertices_to_q(starting_vertices)
         final_Q_list = [Q.copy()]
         for i in range(max_iter):
@@ -425,31 +567,110 @@ class Flying_carpet:
             cmd_diff = [0 for _ in range(self.nCable)]
             cmd_length = cur_length.copy()
             # alpha = 1
-            # dl = alpha*diff/(np.max(np.abs(jac))+1e-6)
-            for k in range(self.nCable):
-                if cable_tension[k] < 1e-5 and jac[k]< 0:
-                    cmd_diff[k] = 0
-                else:
+            # dl = alpha*diff/(np.max(np.abs(jac)))
+            if i == 0:
+                for k in range(self.nCable):
                     cmd_diff[k] = -dl * jac[k]
+            else:
+                for k in range(self.nCable):
+                    if cable_tension[k] < 1e-5 and jac[k]< 0:
+                        cmd_diff[k] = 0
+                    else:
+                        cmd_diff[k] = -dl * jac[k]
             # for k in range(self.nCable):
             #     cmd_diff[k] = -dl * jac[k]
-            cmd_diff = clamp_diff(cmd_diff, min_bound = 1e-3, max_bound = 0.01)
+            cmd_diff = clamp_diff(cmd_diff, min_bound = 1e-3, max_bound = 0.05)
             for k in range(self.nCable):
                 cmd_length[k] += cmd_diff[k]
-            Q_list, starting_vertices, cable_tension = self.FKD_time(cmd_length, 1, Q, tol = 1e-4)
+            Q_list, starting_vertices, cable_tension = self.FKD_time(cmd_length, 10, Q, tol = 1e-4, h = 0.01)
             
             # self.visualize_IKD_result(target_EE_pos, starting_vertices)
             # input("Press Enter to continue...")
             Q = self.vertices_to_q(starting_vertices)
             final_Q_list.append(Q.copy())
             diff_cart = get_diff_cartesian(Q)
-            print("Iteration {}: diff = {}, diff_cart = {}, dl = {}, Jacobian: {}, cable_tension: {}, cmd_diff: {}".format(i, diff, diff_cart, dl, np.round(jac, 5), np.round(cable_tension, 5), np.round(cmd_diff, 5)))
+            if show_info:
+                print("Iteration {}: diff = {}, diff_cart = {}, dl = {}, Jacobian: {}, cable_tension: {}, cmd_diff: {}".format(i, diff, diff_cart, dl, np.round(jac, 5), np.round(cable_tension, 5), np.round(cmd_diff, 5)))
             if diff_cart < tol:
                 print("Converged at iteration {} with diff {}".format(i, diff))
                 break
             cur_length = self.get_cable_length_bary(Q)
         return cur_length, starting_vertices, final_Q_list
 
+    def get_fixedEE_guess_vertices(self, target_EE_pos, show_info = False):
+        def assemble_K_tilde(Q):
+            R_list, R_list_1818 = self.get_R_list(self.q_to_vertices(Q))
+            """Assemble K_mm, f0_m, and the fixed-DOF term -K_mf q_f."""
+            Ke_list = [np.zeros((18,18)) for _ in range(self.num_RF_triangles)]
+            Ke0_list = [np.zeros((18,18)) for _ in range(self.num_RF_triangles)]
+            K_tilde = np.zeros((self.nMoving * 3, self.nMoving * 3))
+            f0_tilde = np.zeros(self.nMoving * 3)
+            K_tilde_vec2add = np.zeros(3*self.nMoving,)
+            for i in range(self.num_RF_triangles):
+                Ke_list[i] = R_list_1818[i] @ self.stiffness_matrices[i] @ R_list_1818[i].T
+                Ke0_list[i] = R_list_1818[i] @ self.stiffness_matrices[i]
+                tri = self.mesh_RF_triangles[i]
+                qe0 = self.qe0_list[i]
+                f0e = Ke0_list[i] @ qe0
+                for j in range(6):
+                    if tri[j] == -1:
+                        continue
+                    idx_j_moving = self.idxAll_2_idxMoving[tri[j]]
+                    if idx_j_moving == -1:
+                        continue
+                    row = slice(3*idx_j_moving, 3*idx_j_moving+3)
+                    f0_tilde[row] += f0e[3*j:3*j+3]
+                    for k in range(6):
+                        if tri[k] == -1:
+                            continue
+                        Ke_jk = Ke_list[i][3*j:3*j+3, 3*k:3*k+3]
+                        idx_k_moving = self.idxAll_2_idxMoving[tri[k]]
+                        # find the idx of tri[k] in the ee_idx list
+                        idx_ee = -1
+                        for l in range(len(self.ee_idx)):
+                            if tri[k] == self.ee_idx[l]:
+                                idx_ee = l
+                                break
+                        if idx_k_moving == -1:
+                            K_tilde_vec2add[row] -= Ke_jk @ target_EE_pos[idx_ee]
+                        else:
+                            col = slice(3*idx_k_moving, 3*idx_k_moving+3)
+                            K_tilde[row, col] += Ke_jk
+
+            return K_tilde, f0_tilde, K_tilde_vec2add
+
+        Q_a = self.vertices_to_q(self.vertices).reshape((3*self.num_vertices, ))
+        Q_list = [Q_a.copy()]
+        gravity_tilde = self.q_to_q_moving(self.gravity_vec)
+        max_iter = 500
+        tol = 1e-6
+        for iteration in range(max_iter):
+            K_tilde, f0_tilde, K_tilde_vec2add = assemble_K_tilde(Q_a)
+            rhs = f0_tilde + gravity_tilde + K_tilde_vec2add
+            try:
+                Q_moving = np.linalg.solve(K_tilde, rhs)
+            except np.linalg.LinAlgError as exc:
+                raise np.linalg.LinAlgError(
+                    "The reduced stiffness matrix is singular; check that the "
+                    "fixed region removes all rigid-body modes."
+                ) from exc
+
+            Q_next = self.q_moving_to_q(Q_moving, target_EE_pos)
+            diff = np.linalg.norm(Q_next - Q_a) / (3*self.nMoving)
+            Q_a = Q_next
+            Q_list.append(Q_a.copy())
+
+            if show_info:
+                residual = np.linalg.norm(K_tilde @ Q_moving - rhs)
+                print(
+                    f"static iteration {iteration + 1}: diff = {diff:.7e}, "
+                    f"linear residual = {residual:.7e}"
+                )
+            if diff < tol:
+                if show_info:
+                    print(f"Static solve converged in {iteration + 1} iterations.")
+                break
+        return self.q_to_vertices(Q_a)
 
     def deform_CG(self, tar_cable_length, starting_vertices, max_iter = 300, tol = 1e-8):
         cur_vertices = starting_vertices.copy()
@@ -781,6 +1002,26 @@ class Flying_carpet:
             energy += self.bending_weight_list[i] * np.linalg.norm(val)**2
         return energy
             
+    def q_to_q_moving(self, q):
+        q_moving = np.zeros((self.nMoving * 3, ))
+        for i in range(self.num_vertices):
+            if self.idxAll_2_idxMoving[i] != -1:
+                idx_moving = self.idxAll_2_idxMoving[i]
+                q_moving[3*idx_moving:3*idx_moving+3] = q[3*i:3*i+3]
+        return q_moving
+    
+    def q_moving_to_q(self, q_moving, target_EE_pos = None):
+        q = self.vertices_to_q(self.vertices)
+        for i in range(self.nMoving):
+            idx_all = self.idxMoving_2_idxAll[i]
+            q[3*idx_all:3*idx_all+3] = q_moving[3*i:3*i+3]
+        for i in range(len(self.ee_idx)):
+            idx_all = self.ee_idx[i]
+            if target_EE_pos is not None:
+                q[3*idx_all:3*idx_all+3] = target_EE_pos[i]
+            else:
+                q[3*idx_all:3*idx_all+3] = self.vertices[idx_all]
+        return q
 
     def replay_Q_list(self, Q_list, filePath="./flying_carpet_FKD.mp4", framerate=10,
                        window_size=(1024, 768)):
@@ -911,8 +1152,8 @@ if __name__ == "__main__":
 
     # flying_carpet.check_bending_params()
     # exit(0)
-    flying_carpet.visualize_vert(flying_carpet.vertices)
-    exit(0)
+    # flying_carpet.visualize_vert(flying_carpet.vertices)
+    # exit(0)
     icl = flying_carpet.initial_cable_length
     shortened_length = 0.05
     tcl = [icl[0]-shortened_length, icl[1]-shortened_length, icl[2]-shortened_length, icl[3]-shortened_length, icl[4], icl[5], icl[6], icl[7]]
