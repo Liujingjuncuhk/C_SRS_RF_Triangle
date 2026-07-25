@@ -57,11 +57,49 @@ def draw_SOFA_compare(c_srs: C_SRS_fixedEnd):
         plotter.show()
 
 
+def read_VTK(file_path):
+    """Read the vertices and tetrahedral connectivity from a VTK mesh.
+
+    Parameters
+    ----------
+    file_path : str or os.PathLike
+        Path to a VTK unstructured-grid file.
+
+    Returns
+    -------
+    mesh_vtk : numpy.ndarray
+        Vertex coordinates with shape ``(n_vertices, 3)``. Coordinates retain
+        the units used by the input file.
+    tetrahedron : numpy.ndarray
+        Zero-based vertex indices with shape ``(n_tetrahedra, 4)``.
+    """
+    file_path = os.fspath(file_path)
+    if not os.path.isfile(file_path):
+        raise FileNotFoundError(f"VTK file does not exist: {file_path}")
+
+    vtk_grid = pv.read(file_path)
+    mesh_vtk = np.asarray(vtk_grid.points).copy()
+    if mesh_vtk.ndim != 2 or mesh_vtk.shape[1] != 3:
+        raise ValueError(
+            f"Expected 3-D VTK points, but received an array with shape "
+            f"{mesh_vtk.shape} from {file_path}"
+        )
+
+    # VTK cell type 10 is a four-node linear tetrahedron.  Using cells_dict
+    # avoids assuming that every cell has the same size or type.
+    cells_dict = getattr(vtk_grid, "cells_dict", {})
+    tetrahedron = cells_dict.get(pv.CellType.TETRA)
+    if tetrahedron is None:
+        raise ValueError(f"No tetrahedral cells were found in VTK file: {file_path}")
+
+    tetrahedron = np.asarray(tetrahedron, dtype=np.int64).reshape(-1, 4).copy()
+    return mesh_vtk, tetrahedron
 
 if __name__ == "__main__":
     cl_list_1 = (np.array([424, 425, 424, 298, 274, 298]) * 1e-3).tolist()
     cl_list_2 = (np.array([416,430 , 436, 302, 270, 286]) * 1e-3).tolist()
     cl_list_3 = (np.array([443, 442, 433, 277,264,292]) * 1e-3).tolist()
+    cl_list_4 = (np.array([363,357,363, 333,305,335]) * 1e-3).tolist()
     description_file = "./models/flat_tri_surface/C_SRS_description_bary.pkl"
     c_srs = C_SRS_fixedEnd(description_file)
     print("initial cable length: ", c_srs.initial_cable_length)
@@ -73,7 +111,7 @@ if __name__ == "__main__":
         data = pickle.load(f)
     pts_list = data["pts_list"]
     fcl_list = data["fcl_list"]
-    cl_lists = [cl_list_1, cl_list_2, cl_list_3]
+    cl_lists = [cl_list_2, cl_list_3, cl_list_4]
     vert_list = []
     for i in range(len(cl_lists)):
         cl_list = cl_lists[i]

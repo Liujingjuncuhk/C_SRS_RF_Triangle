@@ -18,27 +18,50 @@ import pickle
 import matplotlib.pyplot as plt
 
 def dense_ee_target(ee_target_list, nSamples):
-    """Return ``nSamples`` points evenly spaced along the full waypoint path."""
+    """Resample a path while preserving every planned waypoint exactly."""
     waypoints = np.asarray(ee_target_list, dtype=float)
     if waypoints.ndim != 2 or waypoints.shape[0] == 0:
         raise ValueError("ee_target_list must be a non-empty 2D array.")
     if nSamples < 2:
         raise ValueError("nSamples must be at least 2 to include both endpoints.")
+    if nSamples < len(waypoints):
+        raise ValueError(
+            "nSamples must be at least the number of planned waypoints so that "
+            "every waypoint can be included."
+        )
+    if len(waypoints) == 1:
+        return np.repeat(waypoints, nSamples, axis=0)
 
     segment_lengths = np.linalg.norm(np.diff(waypoints, axis=0), axis=1)
-    cumulative_lengths = np.concatenate(([0.0], np.cumsum(segment_lengths)))
-    total_length = cumulative_lengths[-1]
-
-    if total_length == 0.0:
+    if np.all(segment_lengths == 0.0):
         return np.repeat(waypoints[:1], nSamples, axis=0)
 
-    sample_lengths = np.linspace(0.0, total_length, nSamples)
-    dense_targets = np.empty((nSamples, waypoints.shape[1]))
-    for coordinate in range(waypoints.shape[1]):
-        dense_targets[:, coordinate] = np.interp(
-            sample_lengths, cumulative_lengths, waypoints[:, coordinate]
-        )
-    return dense_targets
+    # Assign at least one interval to every segment. Distribute the remaining
+    # intervals by segment length, using largest remainders to keep the total
+    # number of returned samples exactly equal to nSamples.
+    interval_counts = np.ones(len(segment_lengths), dtype=int)
+    remaining = nSamples - len(waypoints)
+    if remaining:
+        shares = remaining * segment_lengths / segment_lengths.sum()
+        extra_intervals = np.floor(shares).astype(int)
+        intervals_left = remaining - extra_intervals.sum()
+        if intervals_left:
+            largest_remainders = np.argsort(-(shares - extra_intervals))
+            extra_intervals[largest_remainders[:intervals_left]] += 1
+        interval_counts += extra_intervals
+
+    dense_targets = [waypoints[0].copy()]
+    for start, end, count in zip(
+        waypoints[:-1], waypoints[1:], interval_counts
+    ):
+        # Exclude the segment endpoints from interpolation. The start is
+        # already present, and directly appending the end guarantees an exact
+        # copy of the planned waypoint without floating-point reconstruction.
+        ratios = np.arange(1, count, dtype=float) / count
+        dense_targets.extend(start + ratios[:, None] * (end - start))
+        dense_targets.append(end.copy())
+
+    return np.asarray(dense_targets)
 
 def draw_cl_cmd(length_cmd_list):
     # length_cmd_list is a list of list, draw for each element
@@ -71,4 +94,3 @@ if __name__ == "__main__":
 
     vert_list = traj_result['vert_list']
     c_srs.replay_IKD_trajectory(ee_target_list, vert_list, framerate = 20, filePath = "IKD_parallelogram_traj.mp4")
-    

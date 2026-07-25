@@ -47,6 +47,7 @@ class C_SRS_fixedEnd:
         self.neighbour_list = self.description['neighbour_list']
         self.neighbour_edge_list = self.description['neighbour_edge_list']        
         self.neighbour_edge_weight_list = []
+        self.tracker_r = 0.0075
         for i in range(self.num_vertices):
             neighbour_edges = self.neighbour_edge_list[i]
             neighbour_weights = []
@@ -1576,6 +1577,39 @@ class C_SRS_fixedEnd:
         plotter.show()
         return plotter
 
+    def get_ee_normvec(self, vert):
+        if vert.shape[0] != self.num_vertices:
+            vert = self.q_to_vertices(vert)
+
+        ee_id = int(np.asarray(self.ee_idx).reshape(-1)[0])
+        ee_triangles = self.mesh_triangles[
+            np.any(self.mesh_triangles == ee_id, axis=1)
+        ]
+        if ee_triangles.shape[0] == 0:
+            raise ValueError(f"EE vertex {ee_id} does not belong to any triangle.")
+
+        triangle_vertices = vert[ee_triangles]
+        face_normals = np.cross(
+            triangle_vertices[:, 1] - triangle_vertices[:, 0],
+            triangle_vertices[:, 2] - triangle_vertices[:, 0],
+        )
+        normal_vec_ee = np.sum(face_normals, axis=0)
+        normal_norm = np.linalg.norm(normal_vec_ee)
+        if normal_norm < 1e-12:
+            raise ValueError(f"Cannot determine a normal for EE vertex {ee_id}.")
+
+        return normal_vec_ee / normal_norm
+
+    def get_tracker_pos(self, vert):
+        normal_vec_ee = self.get_ee_normvec(vert)
+        ee_pos = self.get_ee_pos(vert)
+        tracker_pos = ee_pos + normal_vec_ee*self.tracker_r
+        return tracker_pos
+
+    def get_tracker_ee(self, vert, tracker_pos):
+        normal_vec_ee = self.get_ee_normvec(vert)
+        tracker_ee_pos = tracker_pos - normal_vec_ee*self.tracker_r
+        return tracker_ee_pos
 
     def visualize_IKD_result(self, vertices, target_ee_pos):
         mesh = pv.PolyData(vertices, np.hstack((np.full((self.mesh_triangles.shape[0], 1), 3), self.mesh_triangles)))
@@ -1979,4 +2013,3 @@ if __name__ == "__main__":
     
     
     # c_srs.replay_Q_list(Q_list)
-

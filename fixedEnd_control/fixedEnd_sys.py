@@ -30,8 +30,8 @@ class FixedEndSystem:
         self.motor_controller = FeetechUDPDriver()
         self.camera = FixedEndCamera()
         self.nCable = 6
-        self.calibrated_motor_pos = [2048 for _ in range(self.nCable)]  # Default calibrated positions
-        self.calibrated_cable_length = (np.array([437, 448, 442, 292, 272, 287])*1e-3).tolist()  # Default calibrated lengths in meters
+        self.calibrated_motor_pos = [2048, 1934, 2048, 2048, 2048, 2048]
+        self.calibrated_cable_length = (np.array([437, 445, 442, 292, 272, 287])*1e-3).tolist()  # Default calibrated lengths in meters
         self.default_speed = 0.01
         self.stepPerm = 4096/(0.05*np.pi)
         self.mPerStep = 1/self.stepPerm
@@ -216,9 +216,9 @@ if __name__ == "__main__":
     fixedEnd_sys = FixedEndSystem()
     cl = fixedEnd_sys.get_cur_length()
     print("initial cl is: ", cl)
-    Q_list, tension= fixedEnd_sys.c_srs.FKD_static_length(fixedEnd_sys.c_srs.vertices, cl)
-    pcd = fixedEnd_sys.camera.get_depth_pointcloud(region = filtered_region)
-    pts_points = np.asarray(pcd.points)
-    vert_initial = fixedEnd_sys.c_srs.q_to_vertices(Q_list[-1])
-    plotter = fixedEnd_sys.c_srs.visualize_fb_surface_w_gt(vert_initial, pts_points)
+    # Q_list, tension= fixedEnd_sys.c_srs.FKD_static_length(fixedEnd_sys.c_srs.vertices, cl)
+    # pcd = fixedEnd_sys.camera.get_depth_pointcloud(region = filtered_region)
+    # pts_points = np.asarray(pcd.points)
+    # vert_initial = fixedEnd_sys.c_srs.q_to_vertices(Q_list[-1])
+    # plotter = fixedEnd_sys.c_srs.visualize_fb_surface_w_gt(vert_initial, pts_points)
     # plotter.show()

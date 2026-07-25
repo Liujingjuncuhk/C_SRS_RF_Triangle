@@ -7,12 +7,12 @@ import triangle as tr
 import ezdxf
 
 
-DXF_PATH = "./models/flying_carpet/flying_carpet_tri.dxf"
-MAX_AREA = 50   # max triangle area in DXF units²; lower = finer mesh
+DXF_PATH = "./models/flying_carpet/flying_carpet_tri.DXF"
+MAX_AREA = 150   # max triangle area in DXF units²; lower = finer mesh
 thickness = 0.003 # meter
-Youngs_modulus = 4.2e6 # Pa
-Poisson_ratio = 0.3
-density = 961 # kg/m^3
+Youngs_modulus = 3.0e7 # Pa
+Poisson_ratio = 0.39
+density = 646 # kg/m^3
 
 folder = "./models/flying_carpet/"
 
