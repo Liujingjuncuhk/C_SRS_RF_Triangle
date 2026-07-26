@@ -16,8 +16,9 @@ from C_SRS_fixedEnd import C_SRS_fixedEnd, IK_MLP
 import pickle
 
 
-translation_2add = np.array([0.03608945, 0.2295359,  0.0021551])
-
+# translation_2add = np.array([0.03608945, 0.2295359,  0.0021551])
+translation_2add = np.array([0.03305734, 0.23004783, 0.00180389])
+# translation_2add = np.array([0.03166899, 0.23057712, 0.00117929])
 
 def get_dense_target(target_list, nSample):
     # interpolate target_list to nSample
@@ -331,7 +332,22 @@ def plot_target_record_3d(target_list, ee_positions_recorded, save_path=None, sh
 
     return figure, ax
 
+def find_good_translation(c_srs: C_SRS_fixedEnd, vert_list, tracking_ball_positions):
+    tbp_sim_list = []
+    for i in range(len(vert_list)):
+        vert = vert_list[i]
+        expected_tb = c_srs.get_tracker_pos(vert)
+        tbp_sim_list.append(expected_tb)
 
+    tbp_sim_list = get_dense_target(tbp_sim_list, len(tracking_ball_positions))
+    # find the average translation between tbp_sim_list and tracking_ball_position
+    translation_list = []
+    for i in range(len(tbp_sim_list)):
+        translation_list.append(tbp_sim_list[i] - tracking_ball_positions[i])
+    average_translation = np.mean(translation_list, axis=0)
+    print("average_translation: ", average_translation)
+
+    return average_translation
 
 def get_initial_translation(c_srs: C_SRS_fixedEnd, tracking_ball_positions, vert_list):
     tracking_ball_0 = tracking_ball_positions[0]
@@ -363,14 +379,19 @@ if __name__ == "__main__":
         target_list = cl_data['target_list']
         length_cmd_list = cl_data['length_cmd_list']
         vert_list = cl_data['vert_list']
-
+    # find_good_translation(c_srs, vert_list, tracking_ball_positions)
+    # exit(0)
     # target_list = np.array([[0.26, 0.08, 0.03],
     #                            [0.25, 0.08, 0.07],
     #                            [0.23, 0.08, 0.08],
     #                            [0.24, 0.08, 0.04],
     #                            [0.26, 0.08, 0.03]]) # parallelogram (faked)
-    # get_initial_translation(c_srs, tracking_ball_positions, vert_list)
-    # exit(0)
+
+    # target_list = np.array([[0.26, 0.08, 0.03],
+    #                            [0.24, 0.06, 0.07],
+    #                            [0.24, 0.1, 0.07],
+    #                            [0.26, 0.08, 0.03]]) # triangle
+
     tracking_ball_positions = tracking_ball_positions + translation_2add
     interpolated_normvecs = get_dense_normvec(c_srs, vert_list, tracking_ball_positions)
     ee_positions_recorded = get_ee_trackingball(c_srs, tracking_ball_positions, interpolated_normvecs)
