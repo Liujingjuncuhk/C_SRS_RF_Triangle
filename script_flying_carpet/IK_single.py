@@ -27,7 +27,9 @@ if __name__ == "__main__":
     # offset = np.array([0.27898019, 0.37982945, 0.26301642])
     ee_target_pos = ee_pos_centered + offset
     guess_vert = flying_carpet.get_fixedEE_guess_vertices(ee_target_pos)
-    final_length, final_vert, Q_list = flying_carpet.IKD_single(ee_target_pos, guess_vert, max_iter=50, tol=3e-3, show_info = True)
-
+    final_length, final_vert, Q_list = flying_carpet.IKD_single(ee_target_pos, guess_vert, max_iter=50, tol=5e-3, show_info = True)
+    print("final_length=", final_length)
     # flying_carpet.replay_IKD_Q_list(ee_target_pos, Q_list)
-    flying_carpet.visualize_IKD_result(ee_target_pos, final_vert)
+    # flying_carpet.visualize_IKD_result(ee_target_pos, final_vert)
+    Q_list, vert_length, cable_tension = flying_carpet.FKD_time(final_length, 1, final_vert, tol = 1e-5, show_info=True)
+    flying_carpet.visualize_vert(vert_length)

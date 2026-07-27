@@ -8,23 +8,6 @@ from scipy.linalg import lu_factor, lu_solve
 import torch
 import torch.nn as nn
 import joblib
-import imageio.v2 as imageio
-
-
-def _open_movie_with_pyav(plotter, file_path, framerate):
-    """Attach an ImageIO/PyAV MP4 writer compatible with PyVista frames.
-
-    PyVista 0.46 passes a ``quality`` keyword to ImageIO's writer.  The PyAV
-    plugin does not support that keyword, so create the writer directly and
-    configure each appended image as one video frame.
-    """
-    plotter.mwriter = imageio.get_writer(
-        file_path,
-        fps=framerate,
-        codec="libx264",
-        is_batch=False,
-    )
-
 
 class Flying_carpet:
     def __init__(self, description_file):
@@ -1055,8 +1038,8 @@ class Flying_carpet:
         # Build all actors once; update .points in-place each frame
         surf = pv.PolyData(vertices0.copy(), faces)
         plotter.add_mesh(surf, color='lightgray', show_edges=True)
-        pp_location = self.get_pp_location_bary(vertices0)
-        pp_cloud = pv.PolyData(pp_location)
+
+        pp_cloud = pv.PolyData(vertices0[self.pp_idx].copy())
         plotter.add_mesh(pp_cloud, color='blue', point_size=10,
                          render_points_as_spheres=True, label='Pull points')
 
@@ -1070,9 +1053,8 @@ class Flying_carpet:
 
         # All cable segments in a single PolyData so points update in-place
         cable_pts = np.empty((2 * self.nCable, 3))
-
         for i in range(self.nCable):
-            cable_pts[2 * i]     = pp_location[i]
+            cable_pts[2 * i]     = vertices0[self.pp_idx[i]]
             cable_pts[2 * i + 1] = self.pulley_location[i]
         cable_lines = np.array([[2, 2 * i, 2 * i + 1]
                                  for i in range(self.nCable)]).flatten()
@@ -1084,16 +1066,15 @@ class Flying_carpet:
         plotter.show_grid()
         plotter.show_axes()
         plotter.add_legend()
-        _open_movie_with_pyav(plotter, filePath, framerate)
+        plotter.open_movie(filePath, framerate=framerate)
 
         for Q in Q_list:
             vertices = _to_vertices(Q)
             surf.points = vertices.copy()
-            pp_location = self.get_pp_location_bary(vertices)
-            pp_cloud.points = pp_location
+            pp_cloud.points = vertices[self.pp_idx].copy()
             ee_cloud.points = vertices[self.ee_idx].copy()
             for i in range(self.nCable):
-                cable_pts[2 * i] = pp_location[i]
+                cable_pts[2 * i] = vertices[self.pp_idx[i]]
             cables.points = cable_pts.copy()
             plotter.write_frame()
 
@@ -1147,7 +1128,7 @@ class Flying_carpet:
         plotter.show_grid()
         plotter.show_axes()
         plotter.add_legend()
-        _open_movie_with_pyav(plotter, filePath, framerate)
+        plotter.open_movie(filePath, framerate=framerate)
         for Q in Q_list:
             vertices = _to_vertices(Q)
             surf.points = vertices.copy()
@@ -1174,8 +1155,16 @@ if __name__ == "__main__":
     # flying_carpet.visualize_vert(flying_carpet.vertices)
     # exit(0)
     icl = flying_carpet.initial_cable_length
-    shortened_length = 0.05
+    shortened_length = 0.04
     tcl = [icl[0]-shortened_length, icl[1]-shortened_length, icl[2]-shortened_length, icl[3]-shortened_length, icl[4], icl[5], icl[6], icl[7]]
+    print("Target cable length shortened for " , shortened_length,  ", tcl=", tcl)
+    shortened_length = 0.06
+    tcl = [icl[0]-shortened_length, icl[1]-shortened_length, icl[2]-shortened_length, icl[3]-shortened_length, icl[4], icl[5], icl[6], icl[7]]
+    print("Target cable length shortened for " , shortened_length,  ", tcl=", tcl)
+    shortened_length = 0.08
+    tcl = [icl[0]-shortened_length, icl[1]-shortened_length, icl[2]-shortened_length, icl[3]-shortened_length, icl[4], icl[5], icl[6], icl[7]]
+    print("Target cable length shortened for " , shortened_length,  ", tcl=", tcl)
+    exit(0)
     Q_list, vert_length, cable_tension = flying_carpet.FKD_time(tcl, 1, flying_carpet.vertices, tol = 1e-5, show_info=True)
     # flying_carpet.visualize_fb_surface(vert_length)
     flying_carpet.visualize_vert_paper(vert_length)

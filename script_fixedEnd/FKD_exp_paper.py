@@ -103,6 +103,15 @@ if __name__ == "__main__":
     description_file = "./models/flat_tri_surface/C_SRS_description_bary.pkl"
     c_srs = C_SRS_fixedEnd(description_file)
     print("initial cable length: ", c_srs.initial_cable_length)
+    cl_list = [cl_list_2, cl_list_3, cl_list_4]
+    for i in range(len(cl_list)):
+        cl = cl_list[i]
+        Q_list, cable_tension = c_srs.FKD_static_length(c_srs.vertices, cl, show_info=True)
+        vert_length = c_srs.q_to_vertices(Q_list[-1])
+        c_srs.visualize_vert(vert_length)
+    exit(0)
+
+
     # draw_SOFA_compare(c_srs)
     exit(0)
 

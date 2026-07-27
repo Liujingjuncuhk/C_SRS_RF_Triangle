@@ -61,6 +61,18 @@ def dense_ee_target(ee_target_list, nSamples):
 
     return np.asarray(dense_targets)
 
+def get_total_dis(ee_target_list):
+    """Calculate the total distance of a path defined by waypoints."""
+    waypoints = np.asarray(ee_target_list, dtype=float)
+    if waypoints.ndim != 2 or waypoints.shape[0] == 0:
+        raise ValueError("ee_target_list must be a non-empty 2D array.")
+    if waypoints.shape[1] != 3:
+        raise ValueError("Each waypoint must have exactly three coordinates (X, Y, Z).")
+    dist = 0
+    for i in range(len(waypoints) - 1):
+        dist += np.linalg.norm(waypoints[i + 1] - waypoints[i])
+    return dist
+
 if __name__ == "__main__":
     description_file = "./models/flat_tri_surface/C_SRS_description_bary.pkl"
     c_srs = C_SRS_fixedEnd(description_file)
@@ -70,14 +82,27 @@ if __name__ == "__main__":
     #                            [0.23, 0.08, 0.04],
     #                            [0.26, 0.08, 0.03]]) # parallelogram
 
+    # ee_target_list = np.array([[0.26, 0.08, 0.03],
+    #                        [0.25, 0.08, 0.07],
+    #                        [0.23, 0.08, 0.08],
+    #                        [0.24, 0.08, 0.04],
+    #                        [0.26, 0.08, 0.03]]) # parallelogram (faked)
+
     ee_target_list = np.array([[0.26, 0.08, 0.03],
                                [0.24, 0.06, 0.07],
                                [0.24, 0.1, 0.07],
                                [0.26, 0.08, 0.03]]) # triangle
+
+    total_dis = get_total_dis(ee_target_list)
+    print("total distance of the path:", total_dis)
+    time_list = [30, 20, 10, 5]
+    for total_time in time_list:
+        print("speed:", total_dis/total_time)
+    exit(0)
     dense_targets = dense_ee_target(ee_target_list, nSamples=20)
     # ee_target_list = np.array([[0.25, 0.08, 0.02]])
     c_srs.visualize_planned_traj(c_srs.vertices, ee_target_list)
-    # exit(0)
+    exit(0)
     length_cmd_list = []
     vert_list = []
     starting_vert = c_srs.vertices

@@ -1505,8 +1505,8 @@ class C_SRS_fixedEnd:
         plotter.add_points(vertices[self.fixed_idx], color='black', point_size=10, label='Fixed Vertices')
         # add grid
         plotter.show_grid()
-        plotter.show_axes()
-        plotter.add_legend()
+        # plotter.show_axes()
+        # plotter.add_legend()
         plotter.show()
 
     def visualize_fb_surface(self, vertices):

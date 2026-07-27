@@ -30,9 +30,51 @@ def visualize_3_shapes(flying_carpet, ee_list):
         plotter.add_text(f"Shape {i+1}", position='upper_left', font_size=12, color='black')
     plotter.show()
 
+def view_3_meshes(flying_carpet:Flying_carpet):
+    with open("./data_flying_carpet/3_shapes_FKD.pkl", 'rb') as f:
+        vert_list = pickle.load(f)
+    plotter = pv.Plotter()
+    for i in range(len(vert_list)):
+        vert = vert_list[i]
+        vert[:, 1] += 0.2 * (i - 1)
+        mesh = pv.PolyData(vert, np.hstack((np.full((flying_carpet.mesh_triangles.shape[0], 1), 3), flying_carpet.mesh_triangles)))
+        plotter.add_mesh(mesh, color='lightblue', show_edges=True, opacity = 0.8)
+        pp_locations = flying_carpet.get_pp_location_bary(vert)
+        ee_locations = vert[flying_carpet.ee_idx]
+        # add lines between pullpoints and pulleys
+        for i in range(len(flying_carpet.ee_idx)):
+            plotter.add_points(ee_locations[i], color='red', point_size=10, label='Pullpoints')
+            # plotter.add_lines(np.array([pp_locations[i], flying_carpet.pulley_location[i]]), color='blue', width=2)
+        # plotter.add_text(f"Shape {i+1}", position='upper_left', font_size=12, color='black')
+
+    # plotter.show_grid()
+    plotter.show()
+
 if __name__ == "__main__":
     description_file = "./models/flying_carpet/flying_carpet_description_bary.pkl"
     flying_carpet = Flying_carpet(description_file)
+    icl = flying_carpet.initial_cable_length
+    view_3_meshes(flying_carpet)
+    exit(0)
+
+    vert_list = []
+    shortened_length = 0.06
+    tcl = [icl[0]-shortened_length, icl[1]-shortened_length, icl[2]-shortened_length, icl[3]-shortened_length, icl[4], icl[5], icl[6], icl[7]]
+    print("Target cable length shortened for " , shortened_length,  ", tcl=", tcl)
+    Q_list, vert_length, cable_tension = flying_carpet.FKD_time(tcl, 1, flying_carpet.vertices, tol = 1e-6, show_info=True)
+    vert_list.append(vert_length)
+    shortened_length = 0.1
+    tcl = [icl[0]-shortened_length, icl[1]-shortened_length, icl[2]-shortened_length, icl[3]-shortened_length, icl[4], icl[5], icl[6], icl[7]]
+    Q_list, vert_length, cable_tension = flying_carpet.FKD_time(tcl, 1, flying_carpet.vertices, tol = 1e-7, show_info=True)
+    vert_list.append(vert_length)
+    shortened_length = 0.04
+    tcl = [icl[0]-shortened_length, icl[1]-shortened_length, icl[2]-shortened_length, icl[3]-shortened_length, icl[4], icl[5], icl[6], icl[7]]
+    # Q_list, vert_length, cable_tension = flying_carpet.FKD_time(tcl, 1, flying_carpet.vertices, tol = 1e-5, show_info=True)
+    # vert_list.append(vert_length)
+    with open("./data_flying_carpet/3_shapes_FKD.pkl", 'wb') as f:
+        pickle.dump(vert_list, f)
+    exit(0)
+
 
     with open("./data_flying_carpet/60mm_FKD.pkl", 'rb') as f:
         shape_60 = pickle.load(f)

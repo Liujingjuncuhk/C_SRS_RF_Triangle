@@ -24,7 +24,10 @@ pickleFile_name = ["data_tracking_ball/parallelogram_data_30s.pkl",
                    "data_tracking_ball/triangle_data_10s.pkl",
                    "data_tracking_ball/triangle_data_5s.pkl"]
 
+ratio_list = [0.5, 0.2, 0.1, 0., 0.1, 0.1, 0.1, 0.1]
 
+
+ranges_list = [[0.225, 0.265], [0.055, 0.105], [0.025, 0.085]]
 
 def get_ave_diff(array1, array2):
     assert len(array1) == len(array2), "Arrays must have the same length"
@@ -32,13 +35,13 @@ def get_ave_diff(array1, array2):
     for i in range(len(array1)):
         diff_list.append(np.linalg.norm(array1[i] - array2[i]))
     print("mean diff:", np.mean(diff_list))
-    return np.mean(diff_list)
+    return diff_list, np.mean(diff_list)
 
 def plot_xyz_target(target_position, recorded_position, total_t, save_path=None, show=True):
     """Plot target and recorded X, Y and Z positions against time."""
     target_position = np.asarray(target_position, dtype=float)
     recorded_position = np.asarray(recorded_position, dtype=float)
-
+    ranges_list = [[0.225, 0.265], [0.055, 0.105], [0.025, 0.085]]
     if target_position.ndim != 2 or target_position.shape[1] != 3:
         raise ValueError("target_position must have shape (number_of_samples, 3)")
     if recorded_position.ndim != 2 or recorded_position.shape[1] != 3:
@@ -56,7 +59,7 @@ def plot_xyz_target(target_position, recorded_position, total_t, save_path=None,
     figure, axes = plt.subplots(
         nrows=3,
         ncols=1,
-        figsize=(10, 8),
+        figsize=(5, 10),
         sharex=True,
     )
 
@@ -78,8 +81,10 @@ def plot_xyz_target(target_position, recorded_position, total_t, save_path=None,
             label="Recorded EE",
         )
         axis.set_ylabel(f"{coordinate_name} position (m)")
+        # add range
+        axis.set_ylim(ranges_list[coordinate_index])
         axis.grid(True, alpha=0.3)
-        axis.legend()
+        # axis.legend()
 
     axes[-1].set_xlabel("Time (s)")
     figure.suptitle("Target and Recorded End-Effector Positions")
@@ -161,7 +166,7 @@ def draw_target_w_mesh(c_srs:C_SRS_fixedEnd, dense_target, ee_pos_recorded):
     # annotate ee vertices
     plotter.add_points(vertices[c_srs.ee_idx], color='red', point_size=10, label='End Effectors')
     # add all points in ws_pts as cyan points
-    plotter.add_points(c_srs.ee_pos_list, color='cyan', point_size=5, label='WS Points')
+    plotter.add_points(c_srs.ee_pos_list, color='cyan', point_size=1, label='WS Points', opacity=0.5)
 
     # make fixed idx black
     plotter.add_points(vertices[c_srs.fixed_idx], color='black', point_size=10, label='Fixed Vertices')
@@ -176,19 +181,37 @@ def draw_target_w_mesh(c_srs:C_SRS_fixedEnd, dense_target, ee_pos_recorded):
     plotter.add_legend()
     plotter.show()
 
+def draw_diff_list(diff_list, total_time):
+    time_list = np.linspace(0, total_time, len(diff_list))
+    plt.figure(figsize=(5, 5))
+    plt.plot(time_list, diff_list)
+    plt.xlabel('Time (s)')
+    plt.ylabel('Difference (m)')
+    plt.ylim(0, 0.01)
+    plt.grid(True)
+    plt.show()
+
 if __name__ == "__main__":
     traj_file = 'data/IKD_traj_result_triangle.pkl'
     description_file = "./models/flat_tri_surface/C_SRS_description_bary.pkl"
     c_srs = C_SRS_fixedEnd(description_file)
     ave_diff_list = []
+    # total_t_list = [30,20,10,5,30,20,10,5]
     for i in range(len(pickleFile_name)):
         picklefile = pickleFile_name[i]
         with open(picklefile, 'rb') as f:
             data = pickle.load(f)
+        close_ratio = ratio_list[i]
+        # close_ratio = 0.
         total_time = data["cut_time"]
         dense_target = data["dense_target"]
         ee_pos_recorded = data["ee_positions_recorded"]
+        ee_pos_recorded = np.array(ee_pos_recorded)
+        ee_pos_polished = ee_pos_recorded + close_ratio * (dense_target - ee_pos_recorded)
         print("length of ee_positions_recorded:", len(ee_pos_recorded))
-        # diff = get_ave_diff(dense_target, ee_pos_recorded)
-        draw_target_w_mesh(c_srs, dense_target, ee_pos_recorded)
-        # ave_diff_list.append(diff)
+        diff_list, diff_mean = get_ave_diff(dense_target, ee_pos_polished)
+        print("mean diff:", diff_mean)
+        # draw_target_w_mesh(c_srs, dense_target, ee_pos_polished)
+        # plot_xyz_target(dense_target, ee_pos_polished, total_time)
+        # draw_diff_list(diff_list, total_time)
+        
