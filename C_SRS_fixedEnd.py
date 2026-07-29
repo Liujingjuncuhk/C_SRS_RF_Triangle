@@ -8,7 +8,44 @@ from scipy.linalg import lu_factor, lu_solve
 import torch
 import torch.nn as nn
 import joblib
+import time
+
 class C_SRS_fixedEnd:
+    @staticmethod
+    def _build_canonical_rf_triangles(mesh_triangles):
+        """Build EBST patches with slots 3:6 opposite edges 12, 20, and 01."""
+        triangles = np.asarray(mesh_triangles, dtype=int)
+        edge_map = {}
+        for triangle_idx, (v0, v1, v2) in enumerate(triangles):
+            for a, b, apex in ((v0, v1, v2), (v1, v2, v0), (v2, v0, v1)):
+                edge_map.setdefault(tuple(sorted((int(a), int(b)))), []).append(
+                    (triangle_idx, int(apex))
+                )
+
+        rf_triangles = np.full((len(triangles), 6), -1, dtype=triangles.dtype)
+        rf_triangles[:, :3] = triangles
+        for triangle_idx, triangle in enumerate(triangles):
+            for slot, (a, b) in enumerate(((1, 2), (2, 0), (0, 1)), start=3):
+                edge = tuple(sorted((int(triangle[a]), int(triangle[b]))))
+                incidents = edge_map[edge]
+                if len(incidents) > 2:
+                    raise ValueError(
+                        f"Non-manifold edge ({triangle[a]}, {triangle[b]}) is not supported."
+                    )
+                for neighbour_idx, apex in incidents:
+                    if neighbour_idx != triangle_idx:
+                        rf_triangles[triangle_idx, slot] = apex
+                        break
+        return rf_triangles
+
+    @staticmethod
+    def _best_fit_rotation(current_shape, reference_shape):
+        """Return the proper rotation aligning reference_shape to current_shape."""
+        u, _, vh = np.linalg.svd(current_shape.T @ reference_shape)
+        correction = np.eye(3)
+        correction[-1, -1] = np.linalg.det(u @ vh)
+        return u @ correction @ vh
+
     def __init__(self, description_file):
         with open(description_file, 'rb') as f:
             self.description = pickle.load(f)
@@ -20,7 +57,12 @@ class C_SRS_fixedEnd:
         self.pp_bary_coords = self.description['pp_bary_coords']
         self.pp_bary_offsets = self.description['pp_bary_offsets']
         self.pulley_location = self.description['pulley_locations']
-        self.mesh_RF_triangles = self.description['mesh_RF_triangles']
+        # Older description files store the three EBST neighbour slots in a
+        # different order. Rebuilding from connectivity also fixes those files.
+        self.mesh_RF_triangles = self._build_canonical_rf_triangles(
+            self.mesh_triangles
+        )
+        self.description['mesh_RF_triangles'] = self.mesh_RF_triangles
         self.ee_idx = self.description['ee_idx']
         print("EE idxs: ", self.ee_idx)
         self.stiffness_matrices = self.description['stiffness_matrices']
@@ -40,7 +82,9 @@ class C_SRS_fixedEnd:
         self.Youngs_modulus = 3.58e7
         self.Poisson_ratio = self.description['Poisson_ratio']
         self.Poisson_ratio = 0.39
-        self.reassemble_stiffness_matrices(self.Youngs_modulus, self.description['Poisson_ratio'])
+        self.reassemble_stiffness_matrices(
+            self.Youngs_modulus, self.Poisson_ratio
+        )
         self.density = self.description['density']
         self.ARAP_weight_list = self.description['weight_list']
         self.edge_list = self.description['edge_list']
@@ -107,6 +151,14 @@ class C_SRS_fixedEnd:
                     else:
                         self.N1212[3*i+j, 3*k+j] = -1.0/4.0
         self.nMoving = self.num_vertices - self.nFixed
+        self.moving_dof_idx = np.asarray(
+            [
+                3 * vertex_idx + component
+                for vertex_idx in self.idxMoving_2_idxAll
+                for component in range(3)
+            ],
+            dtype=int,
+        )
         self.initial_ARAP_shape_list = []
         for i in range(self.num_vertices):
             if self.idxAll_2_idxMoving[i] == -1:
@@ -413,11 +465,7 @@ class C_SRS_fixedEnd:
             initial_tri_sk = self.initial_tri_SK_list[i]
             cur_tri = vertices[tri]
             cur_tri_sk = self.N33 @ cur_tri
-            u, s, vh = np.linalg.svd(cur_tri_sk.T @ initial_tri_sk)
-            if np.linalg.det(u @ vh) < 0:
-                u[:, -1] *= -1
-            R = u @ vh
-            R_list[i] = R
+            R_list[i] = self._best_fit_rotation(cur_tri_sk, initial_tri_sk)
         return R_list
 
     def get_rotation_ARAP(self, ARAP_shape_list):
@@ -425,9 +473,9 @@ class C_SRS_fixedEnd:
         for i in range(self.nMoving):
             ARAP_shape = ARAP_shape_list[i]
             ARAP_initial_shape = self.initial_ARAP_shape_list[i]
-            u, s, vh = np.linalg.svd(ARAP_shape.T @ ARAP_initial_shape)
-            R = u @ vh
-            R_list[i] = R
+            R_list[i] = self._best_fit_rotation(
+                ARAP_shape, ARAP_initial_shape
+            )
         return R_list
 
     def get_rotation_cable(self, vertices):
@@ -459,11 +507,9 @@ class C_SRS_fixedEnd:
         for i in range(self.nCable):
             initial_ghost_shape = self.initial_ghost_shape_list[i]
             cur_ghost_shape = cur_ghost_shapes[i]
-            u, s, vh = np.linalg.svd(cur_ghost_shape.T @ initial_ghost_shape)
-            if np.linalg.det(u @ vh) < 0:
-                u[:, -1] *= -1
-            R = u @ vh
-            R_list[i] = R
+            R_list[i] = self._best_fit_rotation(
+                cur_ghost_shape, initial_ghost_shape
+            )
         return R_list
 
     def get_rotation_cable_ghost(self, ghost_vertices):
@@ -614,7 +660,8 @@ class C_SRS_fixedEnd:
             K_mat, f0 = self.assemble_K(R_list_1818)
             disp = Q_a - self.vertices_to_q(self.vertices)
             denom = disp @ self.mass_matrix @ disp
-            damping_coeff = np.sqrt((disp @ K_mat @ disp) / denom) if denom > 1e-30 else 0.0
+            stiffness_energy = max(float(disp @ K_mat @ disp), 0.0)
+            damping_coeff = np.sqrt(stiffness_energy / denom) if denom > 1e-30 else 0.0
             C_mat = 2 * damping_coeff * self.mass_matrix
             A_mat = (1.0/h)*np.eye(3*self.num_vertices) + h * self.W_mat @ K_mat + self.W_mat @ C_mat
             lu, piv = lu_factor(A_mat)
@@ -632,9 +679,33 @@ class C_SRS_fixedEnd:
                 if diff_count >= 10:
                     print(f"Converged at time {t_a:.2f} with diff {diff:.6f} for 10 consecutive steps, stopping simulation.")
                     break
+            else:
+                diff_count = 0
         return Q_list
 
-    def FKD_time(self, target_cable_length, total_time, starting_vertices, tol = 2e-5, show_info = False):
+    def FKD_time(
+        self,
+        target_cable_length,
+        total_time,
+        starting_vertices,
+        tol=2e-5,
+        show_info=False,
+        h=0.002,
+    ):
+        target_cable_length = np.asarray(target_cable_length, dtype=float).reshape(-1)
+        if target_cable_length.size != self.nCable:
+            raise ValueError(f"target_cable_length must contain {self.nCable} values.")
+        if np.any(~np.isfinite(target_cable_length)) or np.any(
+            target_cable_length <= 0.0
+        ):
+            raise ValueError("target_cable_length must contain finite positive values.")
+        if not np.isfinite(total_time) or total_time < 0.0:
+            raise ValueError("total_time must be a finite non-negative value.")
+        if not np.isfinite(h) or h <= 0.0:
+            raise ValueError("h must be a finite positive value.")
+        if not np.isfinite(tol) or tol <= 0.0:
+            raise ValueError("tol must be a finite positive value.")
+
         if starting_vertices.shape[0] == 3*self.num_vertices:
             Q_a = starting_vertices.copy()
         elif starting_vertices.shape[0] == self.num_vertices:
@@ -644,13 +715,12 @@ class C_SRS_fixedEnd:
         Q_a = Q_a.reshape((3*self.num_vertices, ))
         Q_ad = np.zeros((3*self.num_vertices, ))
         t_a = 0.0
-        h = 0.002
-        phi_Qfree = np.zeros((self.nCable, 1))
-        H_free = np.zeros((self.nCable, 3*self.num_vertices))
         Q_list = [Q_a.copy()]
         diff_count = 0
+        cable_tension = np.zeros(self.nCable)
         t_start = time.time()
         while t_a < total_time:
+            dt = min(h, total_time - t_a)
             Q_a_last = Q_a.copy()
             t0 = time.time()
             R_list, R_list_1818 = self.get_R_list(self.q_to_vertices(Q_a))
@@ -659,47 +729,76 @@ class C_SRS_fixedEnd:
             t2 = time.time()
             disp = Q_a - self.vertices_to_q(self.vertices)
             denom = disp @ self.mass_matrix @ disp
-            damping_coeff = np.sqrt((disp @ K_mat @ disp) / denom) if denom > 1e-30 else 0.0
+            stiffness_energy = max(float(disp @ K_mat @ disp), 0.0)
+            damping_coeff = np.sqrt(stiffness_energy / denom) if denom > 1e-30 else 0.0
             C_mat = 2 * damping_coeff * self.mass_matrix
 
-            A_mat = (1.0/h)*np.eye(3*self.num_vertices) + h * self.W_mat @ K_mat + self.W_mat @ C_mat
+            A_mat = (
+                (1.0/dt) * np.eye(3*self.num_vertices)
+                + dt * self.W_mat @ K_mat
+                + self.W_mat @ C_mat
+            )
             lu, piv = lu_factor(A_mat)
 
-            b_vec = self.W_mat @ (-K_mat @ (Q_a + h * Q_ad) + f0 + self.gravity_vec - C_mat @ Q_ad)
+            b_vec = self.W_mat @ (
+                -K_mat @ (Q_a + dt * Q_ad)
+                + f0
+                + self.gravity_vec
+                - C_mat @ Q_ad
+            )
             # dv_free = A_inv @ b_vec
             dv_free = lu_solve((lu, piv), b_vec)
 
-            Q_free = Q_a + h * Q_ad + h * dv_free
-            cl_free = self.get_cable_length_bary(Q_free)
-            H_free = -self.get_cable_Jacobian_bary(Q_free)
-            for i in range(self.nCable):
-                phi_Qfree[i] = target_cable_length[i] - cl_free[i]
-            Z1 = lu_solve((lu, piv), H_free.T)                   # (3n, nCable)
-            # lcp_Mmat = h * H_free @ self.W_mat @ A_inv @ H_free.T
-            lcp_Mmat = h * H_free @ self.W_mat @ Z1
+            Q_free = Q_a + dt * Q_ad + dt * dv_free
+            dv_cor = np.zeros_like(dv_free)
+            cable_tension = np.zeros(self.nCable)
+            constraint_solve_tol = min(tol, 1e-8)
+            for _ in range(5):
+                Q_constrained = Q_free + dt * dv_cor
+                current_lengths = np.asarray(
+                    self.get_cable_length_bary(Q_constrained)
+                )
+                phi = target_cable_length - current_lengths
+                if np.max(np.maximum(-phi, 0.0)) <= constraint_solve_tol:
+                    break
 
-            lcp_q = phi_Qfree.reshape((self.nCable,))
-            cable_tension = projected_gauss_seidel_lcp(lcp_Mmat, lcp_q)
-            Z2 = lu_solve((lu, piv), self.W_mat @ H_free.T)
-            # cable_tension = np.zeros((self.nCable,))
-            # dv_cor = A_inv @ (self.W_mat @ H_free.T @ cable_tension).reshape((3*self.num_vertices, ))
-            dv_cor = Z2 @ cable_tension
+                H = -self.get_cable_Jacobian_bary(Q_constrained)
+                Z = lu_solve((lu, piv), self.W_mat @ H.T)
+                lcp_Mmat = dt * H @ Z
+                tension_increment = projected_gauss_seidel_lcp(lcp_Mmat, phi)
+                if np.linalg.norm(tension_increment, np.inf) <= 1e-14:
+                    break
+                dv_cor += Z @ tension_increment
+                cable_tension += tension_increment
+
             dv = dv_free + dv_cor
             Q_ad = Q_ad + dv
-            Q_a = Q_a + h * Q_ad
-            t_a += h
+            Q_a = Q_a + dt * Q_ad
+            t_a += dt
             Q_list.append(Q_a.copy())
-            diff = np.linalg.norm(Q_a - Q_a_last)/(3*self.num_vertices)
+            diff = np.linalg.norm(Q_a - Q_a_last) / np.sqrt(3*self.num_vertices)
+            current_lengths = np.asarray(self.get_cable_length_bary(Q_a))
+            constraint_error = float(
+                np.max(np.maximum(current_lengths - target_cable_length, 0.0))
+            )
             # if diff < 1e-5:
             #     h *= 0.1
-            if diff < tol and min(phi_Qfree.flatten()) > -1e-3:
+            if diff < tol and constraint_error < tol:
                 diff_count += 1
                 if diff_count >= 10:
                     print(f"Converged at time {t_a:.2f} with diff {diff:.6f} for 10 consecutive steps, stopping simulation.")
                     break
+            else:
+                diff_count = 0
             t3 = time.time()
             if show_info:
-                print(f"t_a: {t_a:.3f}, diff: {diff:.7f}, time for R_list: {t1-t0:.4f}s, time for K_mat: {t2-t1:.4f}s, total time for this step: {t3-t0:.4f}s")
+                print(
+                    f"t_a: {t_a:.3f}, diff: {diff:.7f}, "
+                    f"constraint error: {constraint_error:.7f}, "
+                    f"time for R_list: {t1-t0:.4f}s, "
+                    f"time for K_mat: {t2-t1:.4f}s, "
+                    f"total time for this step: {t3-t0:.4f}s"
+                )
         t_end = time.time()
         print(f"Total simulation time: {t_end - t_start:.2f}s")
         vert_length = self.q_to_vertices(Q_a)
@@ -753,23 +852,31 @@ class C_SRS_fixedEnd:
         return Q_list
 
     def FKD_static(self, starting_vertices, cable_tension, tol = 1e-6, show_info = False):
-        """Solve the gravity-only corotational equilibrium on moving vertices."""
+        """Solve corotational equilibrium for prescribed cable tensions."""
+        cable_tension = np.asarray(cable_tension, dtype=float).reshape(-1)
+        if cable_tension.size != self.nCable:
+            raise ValueError(f"cable_tension must contain {self.nCable} values.")
+        if np.any(~np.isfinite(cable_tension)) or np.any(cable_tension < 0.0):
+            raise ValueError("cable_tension must contain finite non-negative values.")
+        if not np.isfinite(tol) or tol <= 0.0:
+            raise ValueError("tol must be a finite positive value.")
+
         if starting_vertices.shape[0] == 3*self.num_vertices:
             Q_a = starting_vertices.copy()
         elif starting_vertices.shape[0] == self.num_vertices:
             Q_a = self.vertices_to_q(starting_vertices)
+        else:
+            raise ValueError(
+                "starting_vertices should be either a 3n vector or an n by 3 array."
+            )
         Q_list = [Q_a.copy()]
         gravity_tilde = self.q_to_q_moving(self.gravity_vec)
         max_iter = 500
-        H_mat = np.zeros((self.nCable, 3*self.nMoving))
         for iteration in range(max_iter):
             _, R_list_1818 = self.get_R_list(self.q_to_vertices(Q_a))
             K_tilde, f0_tilde, K_tilde_vec2add = self.assemble_K_tilde(R_list_1818)
             H_mat_ori = -self.get_cable_Jacobian_bary(Q_a)
-            for i in range(self.nCable):
-                for j in range(self.nMoving):
-                    idx_all = self.idxMoving_2_idxAll[j]
-                    H_mat[i, j*3:j*3+3] = H_mat_ori[i, idx_all*3:idx_all*3+3]
+            H_mat = H_mat_ori[:, self.moving_dof_idx]
             # Moving part of K q = f0 + f_gravity, after moving the
             # fixed-vertex contribution K_mf q_f to the right-hand side.
             rhs = f0_tilde + gravity_tilde + K_tilde_vec2add + H_mat.T @ cable_tension
@@ -806,51 +913,85 @@ class C_SRS_fixedEnd:
         return Q_list
 
     def FKD_static_length(self, starting_vertices, target_cable_length, tol = 1e-6, show_info = False):
+        target_cable_length = np.asarray(target_cable_length, dtype=float).reshape(-1)
+        if target_cable_length.size != self.nCable:
+            raise ValueError(f"target_cable_length must contain {self.nCable} values.")
+        if np.any(~np.isfinite(target_cable_length)) or np.any(
+            target_cable_length <= 0.0
+        ):
+            raise ValueError("target_cable_length must contain finite positive values.")
+        if not np.isfinite(tol) or tol <= 0.0:
+            raise ValueError("tol must be a finite positive value.")
+
         if starting_vertices.shape[0] == 3*self.num_vertices:
             Q_a = starting_vertices.copy()
         elif starting_vertices.shape[0] == self.num_vertices:
             Q_a = self.vertices_to_q(starting_vertices)
+        else:
+            raise ValueError(
+                "starting_vertices should be either a 3n vector or an n by 3 array."
+            )
         Q_list = [Q_a.copy()]
         gravity_tilde = self.q_to_q_moving(self.gravity_vec)
         max_iter = 500
-        phi_Qfree = np.zeros((self.nCable, 1))
-        H_free = np.zeros((self.nCable, 3*self.nMoving))
+        cable_tension = np.zeros(self.nCable)
         for iteration in range(max_iter):
             _, R_list_1818 = self.get_R_list(self.q_to_vertices(Q_a))
             K_tilde, f0_tilde, K_tilde_vec2add = self.assemble_K_tilde(R_list_1818)
             lu, piv = lu_factor(K_tilde)
             Q_moving_free = lu_solve((lu, piv), f0_tilde + gravity_tilde + K_tilde_vec2add)
-            Q_free = self.q_moving_to_q(Q_moving_free)
-            cl_free = self.get_cable_length_bary(Q_free)
-            for i in range(self.nCable):
-                phi_Qfree[i] = target_cable_length[i] - cl_free[i]
-            H_mat_ori = -self.get_cable_Jacobian_bary(Q_free)
-            for i in range(self.nCable):
-                for j in range(self.nMoving):
-                    idx_all = self.idxMoving_2_idxAll[j]
-                    H_free[i, j*3:j*3+3] = H_mat_ori[i, idx_all*3:idx_all*3+3]
+            Q_moving_cor = np.zeros_like(Q_moving_free)
+            cable_force_moving = np.zeros_like(Q_moving_free)
+            cable_tension = np.zeros(self.nCable)
+            constraint_solve_tol = min(tol, 1e-8)
+            for _ in range(5):
+                Q_constrained = self.q_moving_to_q(
+                    Q_moving_free + Q_moving_cor
+                )
+                current_lengths = np.asarray(
+                    self.get_cable_length_bary(Q_constrained)
+                )
+                phi = target_cable_length - current_lengths
+                if np.max(np.maximum(-phi, 0.0)) <= constraint_solve_tol:
+                    break
 
-            Z1 = lu_solve((lu, piv), H_free.T)                   # (3n, nCable)
-            # lcp_Mmat = h * H_free @ self.W_mat @ A_inv @ H_free.T
-            lcp_Mmat =  H_free @ Z1
+                H_all = -self.get_cable_Jacobian_bary(Q_constrained)
+                H = H_all[:, self.moving_dof_idx]
+                Z = lu_solve((lu, piv), H.T)
+                lcp_Mmat = H @ Z
+                tension_increment = projected_gauss_seidel_lcp(
+                    lcp_Mmat, phi
+                )
+                if np.linalg.norm(tension_increment, np.inf) <= 1e-14:
+                    break
+                Q_moving_cor += Z @ tension_increment
+                cable_force_moving += H.T @ tension_increment
+                cable_tension += tension_increment
 
-            lcp_q = phi_Qfree.reshape((self.nCable,))
-            cable_tension = projected_gauss_seidel_lcp(lcp_Mmat, lcp_q)
-            Q_moving_cor = lu_solve((lu, piv), H_free.T @ cable_tension)
             Q_moving = Q_moving_free + Q_moving_cor
             Q_next = self.q_moving_to_q(Q_moving)
             diff = np.linalg.norm(Q_next - Q_a) / (3*self.nMoving)
             Q_a = Q_next
             Q_list.append(Q_a.copy())
-            rhs = f0_tilde + gravity_tilde + K_tilde_vec2add + H_free.T @ cable_tension
+            current_lengths = np.asarray(self.get_cable_length_bary(Q_a))
+            constraint_error = float(
+                np.max(np.maximum(current_lengths - target_cable_length, 0.0))
+            )
+            rhs = (
+                f0_tilde
+                + gravity_tilde
+                + K_tilde_vec2add
+                + cable_force_moving
+            )
 
             if show_info:
                 residual = np.linalg.norm(K_tilde @ Q_moving - rhs)
                 print(
                     f"static iteration {iteration + 1}: diff = {diff:.7e}, "
+                    f"constraint error = {constraint_error:.7e}, "
                     f"linear residual = {residual:.7e}"
                 )
-            if diff < tol:
+            if diff < tol and constraint_error < tol:
                 if show_info:
                     print(f"Static solve converged in {iteration + 1} iterations.")
                 break
@@ -866,7 +1007,171 @@ class C_SRS_fixedEnd:
     def FKD_trajectory(self, cl_list, time_list):
         pass
 
-    def IKD_single(self, target_ee_pos, starting_vertices, AA = False, tol = 1e-3):
+    def IKD_force(
+        self,
+        target_ee_pos,
+        starting_vertices,
+        starting_force,
+        tol=1e-3,
+        show_info=False,
+    ):
+        """Find non-negative cable forces that move the end effector to a target.
+
+        ``FKD_static`` is used for every forward evaluation.  A local
+        force-to-end-effector Jacobian is obtained by differentiating the
+        reduced static equilibrium while holding the current corotational
+        linearisation fixed,
+
+            K_tilde dq/df = H.T.
+
+        The objective is ``0.5 * ||x_ee - x_target||**2``. Its force-space
+        gradient is ``J_ee.T @ (x_ee - x_target)``. A fixed-gain projected
+        gradient step is used so cable tensions remain non-negative.
+
+        Parameters
+        ----------
+        target_ee_pos : array-like, shape (3,)
+            Desired end-effector position.
+        starting_vertices : array-like, shape (num_vertices, 3) or (3*num_vertices,)
+            Initial configuration supplied to the first static solve.
+        starting_force : array-like, shape (nCable,)
+            Initial cable tensions. Values must be finite and non-negative.
+        tol : float
+            Cartesian end-effector error tolerance, in metres.
+        show_info : bool
+            Print the error and force step at every iteration.
+
+        Returns
+        -------
+        final_vertices : ndarray, shape (num_vertices, 3)
+            Final equilibrium configuration.
+        cable_length : ndarray, shape (nCable,)
+            Cable lengths measured in the final configuration.
+        cable_force : ndarray, shape (nCable,)
+            Non-negative cable tensions used to produce the configuration.
+        """
+        target_ee_pos = np.asarray(target_ee_pos, dtype=float).reshape(-1)
+        if target_ee_pos.size != 3 or np.any(~np.isfinite(target_ee_pos)):
+            raise ValueError("target_ee_pos must contain three finite values.")
+
+        starting_vertices = np.asarray(starting_vertices, dtype=float)
+        if starting_vertices.shape == (self.num_vertices, 3):
+            Q_start = self.vertices_to_q(starting_vertices)
+        elif starting_vertices.size == 3 * self.num_vertices:
+            Q_start = starting_vertices.reshape(3 * self.num_vertices).copy()
+        else:
+            raise ValueError(
+                "starting_vertices should be either a 3n vector or an n by 3 array."
+            )
+        if np.any(~np.isfinite(Q_start)):
+            raise ValueError("starting_vertices must contain only finite values.")
+
+        cable_force = np.asarray(starting_force, dtype=float).reshape(-1)
+        if cable_force.size != self.nCable:
+            raise ValueError(f"starting_force must contain {self.nCable} values.")
+        if np.any(~np.isfinite(cable_force)) or np.any(cable_force < 0.0):
+            raise ValueError("starting_force must contain finite non-negative values.")
+        cable_force = cable_force.copy()
+
+        if not np.isfinite(tol) or tol <= 0.0:
+            raise ValueError("tol must be a finite positive value.")
+
+        idx_ee_moving = self.idxAll_2_idxMoving[self.ee_idx[0]]
+        if idx_ee_moving < 0:
+            raise ValueError("The end-effector vertex is fixed and cannot be controlled.")
+
+        max_iter = 50
+        max_force_step = 0.25
+        gradient_gain = 100.0
+        forward_tol = min(1e-7, tol * 0.1)
+
+        Q_list = self.FKD_static(
+            Q_start, cable_force, tol=forward_tol, show_info=False
+        )
+        Q = Q_list[-1]
+        error = self.get_ee_pos(Q) - target_ee_pos
+        error_norm = float(np.linalg.norm(error))
+
+        if show_info:
+            print(
+                f"force IK iteration 0: error = {error_norm:.7e}, "
+                f"force = {np.round(cable_force, 6)}"
+            )
+
+        for iteration in range(max_iter):
+            if error_norm < tol:
+                if show_info:
+                    print(
+                        f"Force IK converged in {iteration} iterations "
+                        f"with error {error_norm:.7e}."
+                    )
+                break
+
+            # Tangent of the same equilibrium equation used in FKD_static:
+            # K_tilde q_moving = ... + H.T @ cable_force.
+            _, R_list_1818 = self.get_R_list(self.q_to_vertices(Q))
+            K_tilde, _, _ = self.assemble_K_tilde(R_list_1818)
+            H_all = -self.get_cable_Jacobian_bary(Q)
+            H = H_all[:, self.moving_dof_idx]
+            try:
+                lu, piv = lu_factor(K_tilde)
+                dq_dforce = lu_solve((lu, piv), H.T)
+            except (ValueError, np.linalg.LinAlgError) as exc:
+                raise np.linalg.LinAlgError(
+                    "Could not form the force-space Jacobian because the "
+                    "reduced stiffness matrix is singular."
+                ) from exc
+
+            ee_rows = slice(3 * idx_ee_moving, 3 * idx_ee_moving + 3)
+            J_ee = dq_dforce[ee_rows, :]
+
+            objective_gradient = J_ee.T @ error
+            force_step = -gradient_gain * objective_gradient
+
+            # Keep a single gradient update from becoming excessively large.
+            step_scale = float(np.max(np.abs(force_step)))
+            if step_scale > max_force_step:
+                force_step *= max_force_step / step_scale
+
+            next_force = np.maximum(cable_force + force_step, 0.0)
+            projected_step = next_force - cable_force
+            if np.linalg.norm(projected_step, np.inf) < 1e-12:
+                if show_info:
+                    print(
+                        f"Force IK stopped at iteration {iteration + 1}: "
+                        "the projected gradient step is zero."
+                    )
+                break
+
+            # One forward computation per gradient iteration; there is no
+            # trial step, damping solve, or line search.
+            cable_force = next_force
+            Q_list = self.FKD_static(
+                Q, cable_force, tol=forward_tol, show_info=False
+            )
+            Q = Q_list[-1]
+            error = self.get_ee_pos(Q) - target_ee_pos
+            error_norm = float(np.linalg.norm(error))
+
+            if show_info:
+                print(
+                    f"force IK iteration {iteration + 1}: "
+                    f"error = {error_norm:.7e}, "
+                    f"|df|_inf = {np.linalg.norm(projected_step, np.inf):.7e}, "
+                    f"force = {np.round(cable_force, 6)}"
+                )
+        else:
+            if show_info:
+                print(
+                    f"Force IK reached {max_iter} iterations with error "
+                    f"{error_norm:.7e}."
+                )
+
+        final_vertices = self.q_to_vertices(Q)
+        cable_length = self.get_cable_length_bary(final_vertices)
+        return final_vertices, cable_length, cable_force
+
+    def IKD_single(self, target_ee_pos, starting_vertices, AA = False, tol = 1e-3, show_info = False):
         idx_ee = self.ee_idx[0]
         idx_ee_moving = self.idxAll_2_idxMoving[idx_ee]
         max_iter = 50
@@ -935,6 +1240,18 @@ class C_SRS_fixedEnd:
                 diff_minus = 1/2 * np.linalg.norm(ee_pos_minus - target_ee_pos) ** 2
                 Jac[i] = (diff_plus - diff_minus) / cl_diff
             return Jac
+        
+        def flatten_jac(jac, flatten_ratio = 0.5):
+            
+            max_abs_jac = np.max(np.abs(jac))
+            threshold = 0.5 * max_abs_jac
+            jac_toreturn = jac.copy()
+            # if max_abs_jac > 0:
+            for i in range(self.nCable):
+                if np.abs(jac[i]) > threshold:
+                    jac_toreturn[i] *= flatten_ratio
+                
+            return jac_toreturn
 
         tol_fd = 3e-3
         cur_length = self.get_cable_length_bary(Q)
@@ -947,11 +1264,14 @@ class C_SRS_fixedEnd:
             
             diff = get_diff(Q)
             diff_cart = 2*np.sqrt(diff)
-            if diff > tol_fd:
+            if np.sqrt(2*diff) > tol_fd:
                 jac = get_jacobian(Q)
             else:
                 jac = get_jacobian_fd(Q)
             # jac = get_jacobian_fd(Q)
+            # jac = get_jacobian(Q)
+            # jac = flatten_jac(jac)
+            jac[1] *= 0.1
             diff_foreach = diff/self.nCable
             cur_length = self.get_cable_length_bary(Q)
             cmd_diff = [0 for _ in range(self.nCable)]
@@ -962,7 +1282,7 @@ class C_SRS_fixedEnd:
                 if cable_tension[k] < 1e-5 and jac[k] < 0:
                     cmd_diff[k] = 0
                 else:
-                    # cmd_diff[k] = -diff_foreach / jac[k]
+                    # cmd_diff[k] = diff_foreach / jac[k]
                     cmd_diff[k] = -dl * jac[k]
             cmd_diff = clamp_diff(cmd_diff, min_bound = 1e-4, max_bound = 5e-3)
             for k in range(self.nCable):
@@ -990,13 +1310,15 @@ class C_SRS_fixedEnd:
                     Q_list, starting_vertices, cable_tension = self.FKD_time(cl_cmd_next, 1, Q, tol = 1e-5)
                     Q = self.vertices_to_q(starting_vertices)
             diff = np.sqrt(2*diff)
-            # print("Iteration {}: diff = {}, dl = {}, Jacobian: {}, cmd_diff: {}".format(i, diff, dl, np.round(jac, 5), np.round(cmd_diff, 5)))
+            if show_info:
+                # print("Iteration {}: diff = {}".format(i, diff))
+                print("Iteration {}: diff = {}, cmd_diff: {}".format(i, diff, np.round(cmd_diff, 5)*1e3))
             # self.visualize_IKD_result(self.q_to_vertices(Q), target_ee_pos)
             Q_list_final.append(Q.copy())
+            cur_length = self.get_cable_length_bary(Q)
             if diff < tol:
                 print("Converged at iteration {} with diff {}".format(i, diff))
                 break
-            cur_length = self.get_cable_length_bary(Q)
         return cur_length, starting_vertices, Q_list_final
 
     def generate_ws(self, cable_length_ranges, total_number = 1000, saveFile = 'training_data_1.pkl'):
@@ -1246,8 +1568,9 @@ class C_SRS_fixedEnd:
         patch_list = [np.zeros((6,3)) for _ in range(self.num_RF_triangles)]
         for i in range(self.num_RF_triangles):
             tri = self.mesh_RF_triangles[i]
-            X = vertices[tri]
-            patch_list[i] = X
+            for local_node, vertex_idx in enumerate(tri):
+                if vertex_idx != -1:
+                    patch_list[i][local_node] = vertices[vertex_idx]
         return patch_list
     
     def get_ee_pos(self, vertices):
@@ -1341,8 +1664,7 @@ class C_SRS_fixedEnd:
         for i in range(self.num_RF_triangles):
             initial_tri_SK = self.initial_tri_SK_list[i]
             cur_tri_SK = tri_SK_list[i]
-            u, s, vh = np.linalg.svd(cur_tri_SK.T @ initial_tri_SK)
-            R_list[i] = u @ vh
+            R_list[i] = self._best_fit_rotation(cur_tri_SK, initial_tri_SK)
             for j in range(6):
                 R_list_1818[i][3*j:3*j+3, 3*j:3*j+3] = R_list[i]
         return R_list, R_list_1818

@@ -98,21 +98,22 @@ if __name__ == "__main__":
     time_list = [30, 20, 10, 5]
     for total_time in time_list:
         print("speed:", total_dis/total_time)
-    exit(0)
+    # exit(0)
     dense_targets = dense_ee_target(ee_target_list, nSamples=20)
     # ee_target_list = np.array([[0.25, 0.08, 0.02]])
-    c_srs.visualize_planned_traj(c_srs.vertices, ee_target_list)
-    exit(0)
+    # c_srs.visualize_planned_traj(c_srs.vertices, ee_target_list)
+    # exit(0)
     length_cmd_list = []
     vert_list = []
     starting_vert = c_srs.vertices
     for i in range(dense_targets.shape[0]):
         ee_target = dense_targets[i]
-        # if i == 0:
-        tcl = c_srs.ikModel.predict_cable_length(ee_target)
-        Q_list, cable_tension = c_srs.FKD_static_length(starting_vert, tcl)
-        starting_vert = c_srs.q_to_vertices(Q_list[-1])
-        cur_length, starting_vertices, Q_list = c_srs.IKD_single(ee_target, starting_vert,AA = False, tol=1e-3)
+        if i == 0:
+            tcl = c_srs.ikModel.predict_cable_length(ee_target)
+            Q_list, cable_tension = c_srs.FKD_static_length(starting_vert, tcl)
+            starting_vert = c_srs.q_to_vertices(Q_list[-1])
+        cur_length, starting_vertices, Q_list = c_srs.IKD_single(ee_target, starting_vert,AA = False, tol=1e-3, show_info = 1)
+        # starting_vertices, cur_length, cable_tension = c_srs.IKD_force(ee_target, starting_vert,cable_tension, show_info= 1)
         length_cmd_list.append(cur_length)
         vert_list.append(starting_vertices)
     # save the length_cmd_list and vert_list to a pickle file

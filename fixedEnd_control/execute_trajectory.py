@@ -175,7 +175,7 @@ if __name__ == "__main__":
     # print("length of length cmd list: ", len(length_cmd_list))
     # print("length of ", len(length_cmd_list[0]))
 
-    planned_total_time = 5
+    planned_total_time = 20
 
 
     # t_list range from 0 to total_time, with length same as nSample

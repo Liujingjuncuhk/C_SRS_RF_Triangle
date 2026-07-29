@@ -509,7 +509,8 @@ def visualize_3d_mesh(mesh_vertices, mesh_triangles, pp_idx, pulley_locations,ee
 
 
 def build_RF_matrix(triangles):
-    local_edges = [(0, 1), (1, 2), (2, 0)]
+    # Slots 3:6 correspond to the edges opposite central nodes 0, 1, 2.
+    local_edges = [(1, 2), (2, 0), (0, 1)]
     edge_map = {}
     for ti, tri in enumerate(triangles):
         for i, j in local_edges:

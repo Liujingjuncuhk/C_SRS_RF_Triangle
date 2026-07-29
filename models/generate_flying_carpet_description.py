@@ -164,14 +164,15 @@ def build_RF_matrix(triangles):
     Returns RF_triangle_matrix of shape (N_tri, 6).
 
     Columns 0-2 : node indices of the triangle  [n0, n1, n2]
-    Column  3   : global node index opposite to edge 12 (n0-n1) in the neighbour triangle
-    Column  4   : global node index opposite to edge 23 (n1-n2) in the neighbour triangle
-    Column  5   : global node index opposite to edge 31 (n2-n0) in the neighbour triangle
+    Column  3   : global node index opposite to edge (n1,n2) in the neighbour triangle
+    Column  4   : global node index opposite to edge (n2,n0) in the neighbour triangle
+    Column  5   : global node index opposite to edge (n0,n1) in the neighbour triangle
 
     Boundary edges (no neighbour) are filled with -1.
     """
     # local edge definitions: (local_i, local_j) -> opposite local index = 3-i-j
-    local_edges = [(0, 1), (1, 2), (2, 0)]
+    # Slots 3:6 correspond to the edges opposite central nodes 0, 1, 2.
+    local_edges = [(1, 2), (2, 0), (0, 1)]
 
     # map frozenset({a,b}) -> list of (tri_idx, opposite_global_node)
     edge_map = {}
@@ -455,7 +456,8 @@ def visualize_3d_mesh(mesh_vertices, mesh_triangles, pp_idx, pulley_locations,ee
 
 
 def build_RF_matrix(triangles):
-    local_edges = [(0, 1), (1, 2), (2, 0)]
+    # Slots 3:6 correspond to the edges opposite central nodes 0, 1, 2.
+    local_edges = [(1, 2), (2, 0), (0, 1)]
     edge_map = {}
     for ti, tri in enumerate(triangles):
         for i, j in local_edges:

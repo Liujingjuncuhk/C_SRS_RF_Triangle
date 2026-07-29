@@ -435,8 +435,15 @@ def projected_gauss_seidel_lcp(
         
         # Full residual (for convergence check)
         w = M @ z + q
-        residual = np.maximum(z, w)  # violation = max(z_i, w_i) when one should be zero
-        res_norm = np.linalg.norm(residual, np.inf)
+        # LCP feasibility and complementarity:
+        # z >= 0, w >= 0, and min(z, w) == 0 componentwise.
+        feasibility = max(
+            0.0,
+            float(np.max(-z, initial=0.0)),
+            float(np.max(-w, initial=0.0)),
+        )
+        complementarity = float(np.linalg.norm(np.minimum(z, w), np.inf))
+        res_norm = max(feasibility, complementarity)
         
         if res_norm < tol:
             if verbose:

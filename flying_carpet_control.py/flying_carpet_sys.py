@@ -17,7 +17,7 @@ import pickle
 import pyvista as pv
 import cv2
 
-class ESEE_CDPR_sys():
+class Flying_carpet_sys():
     def __init__(self, robot_description_file = "./models/flying_carpet/flying_carpet_description_bary.pkl"):
         self.robot = Flying_carpet(robot_description_file)
         self.motor_ids = [1,2,3,4,5,6,7,8]
@@ -26,13 +26,13 @@ class ESEE_CDPR_sys():
         time.sleep(0.1)
         self.stepPerm = 4096/(0.08*np.pi)
         self.mPerStep = 1/self.stepPerm
-        self.calibrate_cable_length =  (np.array([528, 469 , 512, 475, 456, 423, 452, 425])*1e-3).tolist()
-        self.calibrate_motor_pos = [2048 for _ in range(self.robot.nCable)]
+        self.calibrate_cable_length =  (np.array([512, 498, 527, 493, 438, 413, 448, 405])*1e-3).tolist()
+        self.calibrate_motor_pos = [2048, 2048,2048,2048,2048,2048,2048,2048]
         self.initial_cable_length = self.get_cur_length()
         self.initial_motor_pos = self.motor_driver.read_positions()
-
+        self.nCable = self.robot.nCable
         self.cur_cable_length = self.get_cur_length()
-        Q_list_all, self.starting_vertices, cable_tension = self.robot.FKD_time(self.cur_cable_length, self.robot.vertices)
+        Q_list_all, self.starting_vertices, cable_tension = self.robot.FKD_time(self.cur_cable_length, 10, self.robot.vertices)
         self.robot.visualize_vert(self.starting_vertices)
 
     def get_cur_length(self):
@@ -85,7 +85,7 @@ class ESEE_CDPR_sys():
                 cur_length[i] += d_length[i]
             self.move_to_length_timed(cur_length, duration)
 
-    def execute_cable_length_traj(self, cable_length_list, time_list, feedback = False):
+    def execute_cable_length_traj_maxSpeed(self, cable_length_list, time_list, feedback = False):
         """
         Follow a cable length trajectory in real time at the highest motor speed.
 
@@ -191,12 +191,52 @@ class ESEE_CDPR_sys():
         self.move_to_length(self.initial_cable_length, [0.08 for _ in range(self.robot.nCable)])
         return last_lengths
 
-    def execute_traj(self, traj_file: str):
-        with open(traj_file, 'rb') as f:
-            traj_data = pickle.load(f)
-        Q_list_all = traj_data["Q_list_all"]
-        diff_idx = traj_data["diff_idx"]
-        cable_length_list = traj_data["cable_length_list"]
+    def execute_traj(self, time_stamp: list, traj_length: list):
+        """
+        Execute a trajectory of cable lengths over time.
+
+        Args:
+            time_stamp (list): Monotonic time stamps in seconds. The first
+                timestamp must be 0.
+            traj_length (list): Cable lengths for each timestamp, shape
+                (num_waypoints, nCable). The first row is assumed to be the
+                current cable length and is not commanded.
+        """
+        time_stamp = np.asarray(time_stamp, dtype=float).reshape(-1)
+        traj_length = np.asarray(traj_length, dtype=float)
+
+        if time_stamp.ndim != 1:
+            raise ValueError("time_stamp must be a 1D list or array.")
+        if len(time_stamp) == 0:
+            raise ValueError("time_stamp must contain at least one timestamp.")
+        if not np.isclose(time_stamp[0], 0.0):
+            raise ValueError("time_stamp must start at 0.")
+        if np.any(np.diff(time_stamp) <= 0):
+            raise ValueError("time_stamp must be strictly increasing.")
+        if traj_length.ndim != 2 or traj_length.shape[1] != self.nCable:
+            raise ValueError(
+                f"traj_length must have shape (num_waypoints, {self.nCable})."
+            )
+        if traj_length.shape[0] != len(time_stamp):
+            raise ValueError(
+                "traj_length and time_stamp must have the same number of waypoints."
+            )
+
+        if len(time_stamp) == 1:
+            return
+
+        start_time = time.monotonic()
+        for i in range(1, len(time_stamp)):
+            prev_lengths = traj_length[i - 1]
+            target_lengths = traj_length[i]
+            dt = time_stamp[i] - time_stamp[i - 1]
+            segment_speed = np.abs(target_lengths - prev_lengths) / dt
+            self.move_to_length(target_lengths.tolist(), segment_speed.tolist())
+
+            next_time = start_time + time_stamp[i]
+            remaining = next_time - time.monotonic()
+            if remaining > 0:
+                time.sleep(remaining)
 
     def visualize_mesh_w_feedback(self, verts, feedback_pts):
         # verts = self.robot.Q_to_vertices(Q)
@@ -293,7 +333,6 @@ class ESEE_CDPR_sys():
         # return plotter for saving screenshot later
         return plotter
 
-
     def visualize_tar_pts_and_fb_pts(self, tar_pts, fb_pts):
         plotter = pv.Plotter()
         # Add target feedback points
@@ -364,6 +403,15 @@ class ESEE_CDPR_sys():
                 print(f"Converged at iteration {iter_count}, diff: {diff}")
                 break
         return vertices_cor
+
+    def get_feedback_pts(self, cam_indices: list[int] = [0,1,2,3], 
+                         voxel_size: float = 0.005,
+        x_range: tuple[float, float] | None = None,
+        y_range: tuple[float, float] | None = None,
+        z_range: tuple[float, float] | None = None,):
+        pts = self.camera_driver.get_point_cloud(cam_indices, voxel_size, x_range, y_range, z_range)
+        return_pts = np.asarray(pts.points)
+        return return_pts
 
     def feedback_control(self, tar_vert_fb, starting_vert, max_iter=30, tol=1e-6, out_dir = "figures/feedback_control/"):
         def cal_diff(tar_fb, cur_fb): # both of shape (n_feedback, 3)
@@ -500,5 +548,13 @@ class ESEE_CDPR_sys():
             exit(0)
 
 if __name__ == "__main__":
-    pass
+    flying_carpet_sys = Flying_carpet_sys()
+
+    vert = flying_carpet_sys.starting_vertices
+    xrange = (np.min(vert[:,0]-0.01), np.max(vert[:,0]+0.01))
+    yrange = (np.min(vert[:,1]-0.01), np.max(vert[:,1]+0.01))
+    zrange = (np.min(vert[:,2]-0.01), np.max(vert[:,2]+0.01))
+    initial_pts = flying_carpet_sys.get_feedback_pts(cam_indices=[0,1], x_range=xrange, y_range=yrange, z_range=zrange)
+    flying_carpet_sys.robot.visualize_vert_w_fb(flying_carpet_sys.starting_vertices, initial_pts)
+
 

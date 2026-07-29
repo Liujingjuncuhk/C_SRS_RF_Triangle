@@ -8,8 +8,44 @@ from scipy.linalg import lu_factor, lu_solve
 import torch
 import torch.nn as nn
 import joblib
+import time
 
 class Flying_carpet:
+    @staticmethod
+    def _build_canonical_rf_triangles(mesh_triangles):
+        """Build EBST patches with slots 3:6 opposite edges 12, 20, and 01."""
+        triangles = np.asarray(mesh_triangles, dtype=int)
+        edge_map = {}
+        for triangle_idx, (v0, v1, v2) in enumerate(triangles):
+            for a, b, apex in ((v0, v1, v2), (v1, v2, v0), (v2, v0, v1)):
+                edge_map.setdefault(tuple(sorted((int(a), int(b)))), []).append(
+                    (triangle_idx, int(apex))
+                )
+
+        rf_triangles = np.full((len(triangles), 6), -1, dtype=triangles.dtype)
+        rf_triangles[:, :3] = triangles
+        for triangle_idx, triangle in enumerate(triangles):
+            # EBST side i is the edge opposite central node i.
+            for slot, (a, b) in enumerate(((1, 2), (2, 0), (0, 1)), start=3):
+                incidents = edge_map[tuple(sorted((int(triangle[a]), int(triangle[b]))))]
+                if len(incidents) > 2:
+                    raise ValueError(
+                        f"Non-manifold edge ({triangle[a]}, {triangle[b]}) is not supported."
+                    )
+                for neighbour_idx, apex in incidents:
+                    if neighbour_idx != triangle_idx:
+                        rf_triangles[triangle_idx, slot] = apex
+                        break
+        return rf_triangles
+
+    @staticmethod
+    def _best_fit_rotation(current_shape, reference_shape):
+        """Return the proper rotation aligning reference_shape to current_shape."""
+        u, _, vh = np.linalg.svd(current_shape.T @ reference_shape)
+        correction = np.eye(3)
+        correction[-1, -1] = np.linalg.det(u @ vh)
+        return u @ correction @ vh
+
     def __init__(self, description_file):
         with open(description_file, 'rb') as f:
             self.description = pickle.load(f)
@@ -26,7 +62,11 @@ class Flying_carpet:
         self.pp_bary_coords = self.description['pp_bary_coords']
         self.pp_bary_offsets = self.description['pp_bary_offsets']
         self.pulley_location = self.description['pulley_locations']
-        self.mesh_RF_triangles = self.description['mesh_RF_triangles']
+        # Reconstruct the RF patches from connectivity. Older description files
+        # stored the three neighbour slots in a different order from the EBST
+        # stiffness routine.
+        self.mesh_RF_triangles = self._build_canonical_rf_triangles(self.mesh_triangles)
+        self.description['mesh_RF_triangles'] = self.mesh_RF_triangles
         self.ee_idx = self.description['ee_idx']
         self.stiffness_matrices = self.description['stiffness_matrices']
         self.mass_matrix = self.description['mass_matrix']
@@ -48,10 +88,19 @@ class Flying_carpet:
         self.thickness = self.description['thickness']
         self.Youngs_modulus = self.description['Youngs_modulus']
         self.Youngs_modulus = 3.0e7
+        # self.Youngs_modulus = 4.2e6
         self.Poisson_ratio = self.description['Poisson_ratio']
         self.Poisson_ratio = 0.39
-        self.density = self.description['density']
+        stored_density = float(self.description['density'])
+        self.density = stored_density
         self.density = 619.230769230769
+        if not np.isclose(self.density, stored_density):
+            self.mass_matrix = (
+                np.asarray(self.mass_matrix, dtype=float).copy()
+                * (self.density / stored_density)
+            )
+            self.description['mass_matrix'] = self.mass_matrix
+            self.description['density'] = self.density
         self.reassemble_stiffness_matrices(self.Youngs_modulus, self.Poisson_ratio)
         self.ARAP_weight_list = self.description['weight_list']
         self.edge_list = self.description['edge_list']
@@ -350,9 +399,7 @@ class Flying_carpet:
             initial_tri_sk = self.initial_tri_SK_list[i]
             cur_tri = vertices[tri]
             cur_tri_sk = self.N33 @ cur_tri
-            u, s, vh = np.linalg.svd(cur_tri_sk.T @ initial_tri_sk)
-            R = u @ vh
-            R_list[i] = R
+            R_list[i] = self._best_fit_rotation(cur_tri_sk, initial_tri_sk)
         return R_list
 
     def get_rotation_ARAP(self, ARAP_shape_list):
@@ -360,9 +407,7 @@ class Flying_carpet:
         for i in range(self.num_vertices):
             ARAP_shape = ARAP_shape_list[i]
             ARAP_initial_shape = self.initial_ARAP_shape_list[i]
-            u, s, vh = np.linalg.svd(ARAP_shape.T @ ARAP_initial_shape)
-            R = u @ vh
-            R_list[i] = R
+            R_list[i] = self._best_fit_rotation(ARAP_shape, ARAP_initial_shape)
         return R_list
 
     def get_rotation_cable(self, vertices):
@@ -394,11 +439,9 @@ class Flying_carpet:
         for i in range(self.nCable):
             initial_ghost_shape = self.initial_ghost_shape_list[i]
             cur_ghost_shape = cur_ghost_shapes[i]
-            u, s, vh = np.linalg.svd(cur_ghost_shape.T @ initial_ghost_shape)
-            if np.linalg.det(u @ vh) < 0:
-                u[:, -1] *= -1
-            R = u @ vh
-            R_list[i] = R
+            R_list[i] = self._best_fit_rotation(
+                cur_ghost_shape, initial_ghost_shape
+            )
         return R_list
 
     def get_rotation_cable_ghost(self, ghost_vertices):
@@ -452,7 +495,19 @@ class Flying_carpet:
                     bVec[idx_row_start+k] += self.weight_ghost * rotated_ghost_shape[j, k]
         return bVec
     
-    def FKD_time(self, target_cable_length, total_time, starting_vertices, tol = 1e-5, show_info = False, h = 0.01):
+    def FKD_time(self, target_cable_length, total_time, starting_vertices, tol = 1e-4, show_info = False, h = 0.01):
+        target_cable_length = np.asarray(target_cable_length, dtype=float).reshape(-1)
+        if target_cable_length.size != self.nCable:
+            raise ValueError(f"target_cable_length must contain {self.nCable} values.")
+        if np.any(~np.isfinite(target_cable_length)) or np.any(target_cable_length <= 0.0):
+            raise ValueError("target_cable_length must contain finite positive values.")
+        if not np.isfinite(total_time) or total_time < 0.0:
+            raise ValueError("total_time must be a finite non-negative value.")
+        if not np.isfinite(h) or h <= 0.0:
+            raise ValueError("h must be a finite positive value.")
+        if not np.isfinite(tol) or tol <= 0.0:
+            raise ValueError("tol must be a finite positive value.")
+
         if starting_vertices.shape[0] == 3*self.num_vertices:
             Q_a = starting_vertices.copy()
         elif starting_vertices.shape[0] == self.num_vertices:
@@ -463,12 +518,12 @@ class Flying_carpet:
         Q_ad = np.zeros((3*self.num_vertices, ))
         t_a = 0.0
         # h = 0.1
-        phi_Qfree = np.zeros((self.nCable, 1))
-        H_free = np.zeros((self.nCable, 3*self.num_vertices))
         Q_list = [Q_a.copy()]
         diff_count = 0
+        cable_tension = np.zeros(self.nCable)
         t_start = time.time()
         while t_a < total_time:
+            dt = min(h, total_time - t_a)
             Q_a_last = Q_a.copy()
             t0 = time.time()
             R_list, R_list_1818 = self.get_R_list(self.q_to_vertices(Q_a))
@@ -477,47 +532,64 @@ class Flying_carpet:
             t2 = time.time()
             disp = Q_a - self.vertices_to_q(self.vertices)
             denom = disp @ self.mass_matrix @ disp
-            damping_coeff = np.sqrt((disp @ K_mat @ disp) / denom) if denom > 1e-30 else 0.0
+            stiffness_energy = max(float(disp @ K_mat @ disp), 0.0)
+            damping_coeff = np.sqrt(stiffness_energy / denom) if denom > 1e-30 else 0.0
             C_mat = 2 * damping_coeff * self.mass_matrix
 
-            A_mat = (1.0/h)*np.eye(3*self.num_vertices) + h * self.W_mat @ K_mat + self.W_mat @ C_mat
+            A_mat = (1.0/dt)*np.eye(3*self.num_vertices) + dt * self.W_mat @ K_mat + self.W_mat @ C_mat
             lu, piv = lu_factor(A_mat)
-            b_vec = self.W_mat @ (-K_mat @ (Q_a + h * Q_ad) + f0 + self.gravity_vec - C_mat @ Q_ad)
+            b_vec = self.W_mat @ (-K_mat @ (Q_a + dt * Q_ad) + f0 + self.gravity_vec - C_mat @ Q_ad)
             # dv_free = A_inv @ b_vec
             dv_free = lu_solve((lu, piv), b_vec)
-            Q_free = Q_a + h * Q_ad + h * dv_free
-            cl_free = self.get_cable_length_bary(Q_free)
-            H_free = -self.get_cable_Jacobian_bary(Q_free)
-            for i in range(self.nCable):
-                phi_Qfree[i] = target_cable_length[i] - cl_free[i]
-            Z1 = lu_solve((lu, piv), H_free.T)                   # (3n, nCable)
-            lcp_Mmat = h * H_free @ self.W_mat @ Z1
-            lcp_q = phi_Qfree.reshape((self.nCable,))
-            cable_tension = projected_gauss_seidel_lcp(lcp_Mmat, lcp_q)
-            # lcp_sol = qe.optimize.lcp_lemke(lcp_Mmat, lcp_q)
-            # if not lcp_sol.success:
-            #     print("lcp failed: ")
-            #     break
-            # cable_tension = lcp_sol.z
-            Z2 = lu_solve((lu, piv), self.W_mat @ H_free.T)
-            dv_cor = Z2 @ cable_tension
+            Q_free = Q_a + dt * Q_ad + dt * dv_free
+            # Solve the nonlinear length constraints with a few updated
+            # linearizations. Each increment uses
+            # q_correction = dt * A^-1 M^-1 H^T lambda, whose Delassus
+            # operator is dt * H A^-1 M^-1 H^T.
+            dv_cor = np.zeros_like(dv_free)
+            cable_tension = np.zeros(self.nCable)
+            constraint_solve_tol = min(tol, 1e-8)
+            for _ in range(5):
+                Q_constrained = Q_free + dt * dv_cor
+                current_lengths = np.asarray(
+                    self.get_cable_length_bary(Q_constrained)
+                )
+                phi = target_cable_length - current_lengths
+                if np.max(np.maximum(-phi, 0.0)) <= constraint_solve_tol:
+                    break
+
+                H = -self.get_cable_Jacobian_bary(Q_constrained)
+                Z = lu_solve((lu, piv), self.W_mat @ H.T)
+                lcp_Mmat = dt * H @ Z
+                tension_increment = projected_gauss_seidel_lcp(lcp_Mmat, phi)
+                if np.linalg.norm(tension_increment, np.inf) <= 1e-14:
+                    break
+                dv_cor += Z @ tension_increment
+                cable_tension += tension_increment
+
             dv = dv_free + dv_cor
             Q_ad = Q_ad + dv
-            Q_a = Q_a + h * Q_ad
-            t_a += h
+            Q_a = Q_a + dt * Q_ad
+            t_a += dt
             Q_list.append(Q_a.copy())
-            diff = np.linalg.norm(Q_a - Q_a_last)/(3*self.num_vertices)
+            diff = np.linalg.norm(Q_a - Q_a_last) / self.num_vertices
+            current_lengths = np.asarray(self.get_cable_length_bary(Q_a))
+            constraint_error = float(
+                np.max(np.maximum(current_lengths - target_cable_length, 0.0))
+            )
             # if diff < 1e-5:
             #     h *= 0.1
             # if diff < tol and min(phi_Qfree.flatten()) > -1e-3:
-            if diff < tol:
+            if diff < tol and constraint_error < tol:
                 diff_count += 1
                 if diff_count >= 10:
                     # print(f"Converged at time {t_a:.2f} with diff {diff:.6f} for 10 consecutive steps, stopping simulation.")
                     break
+            else:
+                diff_count = 0
             t3 = time.time()
             if show_info:
-                print(f"t_a: {t_a:.3f}, diff: {diff:.7f}, time for R_list: {t1-t0:.4f}s, time for K_mat: {t2-t1:.4f}s, total time for this step: {t3-t0:.4f}s")
+                print(f"t_a: {t_a:.3f}, diff: {diff:.7f}, constraint error: {constraint_error:.7f}, time for R_list: {t1-t0:.4f}s, time for K_mat: {t2-t1:.4f}s, total time for this step: {t3-t0:.4f}s")
         t_end = time.time()
         # print(f"Total simulation time: {t_end - t_start:.2f}s")
         vert_length = self.q_to_vertices(Q_a)
@@ -556,7 +628,8 @@ class Flying_carpet:
         if initial_guess:
             starting_vertices = self.get_fixedEE_guess_vertices(target_EE_pos)
             cur_length = self.get_cable_length_bary(starting_vertices)
-            Q_list, starting_vertices, cable_tension = self.FKD_time(cur_length, 1, starting_vertices)
+            Q_list, starting_vertices, cable_tension = self.FKD_time(cur_length, 10, starting_vertices, tol = 5e-5, h = 0.01, show_info=False)
+            # self.visualize_vert(starting_vertices)
         Q = self.vertices_to_q(starting_vertices)
         final_Q_list = [Q.copy()]
         for i in range(max_iter):
@@ -752,8 +825,7 @@ class Flying_carpet:
         for i in range(self.num_RF_triangles):
             initial_tri_SK = self.initial_tri_SK_list[i]
             cur_tri_SK = tri_SK_list[i]
-            u, s, vh = np.linalg.svd(cur_tri_SK.T @ initial_tri_SK)
-            R_list[i] = u @ vh
+            R_list[i] = self._best_fit_rotation(cur_tri_SK, initial_tri_SK)
             for j in range(6):
                 R_list_1818[i][3*j:3*j+3, 3*j:3*j+3] = R_list[i]
         return R_list, R_list_1818
@@ -1022,6 +1094,28 @@ class Flying_carpet:
             else:
                 q[3*idx_all:3*idx_all+3] = self.vertices[idx_all]
         return q
+
+    def visualize_vert_w_fb(self, vertices, fb_pts):
+        if vertices.shape[0] != self.num_vertices:
+            vertices = self.q_to_vertices(vertices)
+
+        fb_vertices = self.get_fb_surface(vertices)
+        faces = np.hstack((np.full((self.mesh_triangles.shape[0], 1), 3), self.mesh_triangles))
+        mesh_surface = pv.PolyData(vertices, faces)
+        mesh_fb = pv.PolyData(fb_vertices, faces)
+
+        plotter = pv.Plotter()
+        # plotter.add_mesh(mesh_surface, color='lightgray', show_edges=True, opacity=0.35, label='Input Surface')
+        plotter.add_mesh(mesh_fb, color='lightblue', show_edges=True, opacity=0.95, label='FB Mid-Surface')
+        plotter.add_points(vertices[self.ee_idx], color='red', point_size=10, label='FB EE Vertices')
+        plotter.add_points(fb_pts, color='yellow', point_size=8, render_points_as_spheres=True)
+
+        
+        plotter.show_grid()
+        plotter.show_axes()
+        plotter.add_legend()
+        plotter.show()
+        
 
     def replay_Q_list(self, Q_list, filePath="./flying_carpet_FKD.mp4", framerate=10,
                        window_size=(1024, 768)):
