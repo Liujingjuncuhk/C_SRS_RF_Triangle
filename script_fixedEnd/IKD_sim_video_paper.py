@@ -84,7 +84,7 @@ def draw_cl_cmd(length_cmd_list):
 if __name__ == "__main__":
     description_file = "./models/flat_tri_surface/C_SRS_description_bary.pkl"
     c_srs = C_SRS_fixedEnd(description_file)
-    picklefile = "./data/IKD_traj_result_triangle_half_mirror.pkl"
+    picklefile = "./data/IKD_traj_result_paral_new.pkl"
     with open(picklefile, "rb") as f:
         traj_result = pickle.load(f)
     ee_target_list = traj_result['target_list']
@@ -92,5 +92,5 @@ if __name__ == "__main__":
     # draw the length cmd list using matplotlib
     draw_cl_cmd(length_cmd_list)
 
-    # vert_list = traj_result['vert_list']
-    # c_srs.replay_IKD_trajectory(ee_target_list, vert_list, framerate = 5, filePath = "IKD_paral_traj_new.mp4")
+    vert_list = traj_result['vert_list']
+    c_srs.replay_IKD_trajectory(ee_target_list, vert_list, framerate = 5, filePath = "IKD_paral_traj_new.mp4")

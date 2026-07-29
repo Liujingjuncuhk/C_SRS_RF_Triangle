@@ -33,7 +33,9 @@ if __name__ == "__main__":
     length_cmd_list_mirrorer = length_cmd_list.copy()
     vert_list_mirrorer = vert_list.copy()
     for i in range(1, nEE):
-        ee_target_list_mirrorer.append(ee_target_list[nEE - 1 - i])
+        ee_target_toAppend = ee_target_list[nEE - 1 - i].copy()
+        ee_target_toAppend[1] = 0.16 - ee_target_toAppend[1]
+        ee_target_list_mirrorer.append(ee_target_toAppend)
         length_cmd_toMirror = length_cmd_list[nEE - 1 - i]
         length_cmd_toAppend = length_cmd_toMirror.copy()
         length_cmd_toAppend[0] = length_cmd_toMirror[2]
