@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 import joblib
 import time
-
+from scipy.optimize import minimize
 class C_SRS_fixedEnd:
     @staticmethod
     def _build_canonical_rf_triangles(mesh_triangles):
@@ -851,6 +851,22 @@ class C_SRS_fixedEnd:
 
         return Q_list
 
+    def find_closest_in_ws(self, ee_target):
+        """Find the closest point in the workspace to the given target."""
+        ee_target = np.asarray(ee_target, dtype=float).reshape(-1)
+
+        # search the closest in ee_pos_list
+        ee_pos_array = np.asarray(self.ee_pos_list, dtype=float)
+        distances = np.linalg.norm(ee_pos_array - ee_target, axis=1)
+        closest_idx = np.argmin(distances)
+        closest_point = ee_pos_array[closest_idx]
+        closest_cl = self.cl_list[closest_idx]
+        closest_vert = self.vertices_list[closest_idx]
+        diff = np.linalg.norm(closest_point - ee_target)
+        print(f"Closest point in workspace: {closest_point}, cable length: {closest_cl}, distance to target: {diff:.6f}")
+
+        return closest_point, closest_cl, closest_vert
+
     def FKD_static(self, starting_vertices, cable_tension, tol = 1e-6, show_info = False):
         """Solve corotational equilibrium for prescribed cable tensions."""
         cable_tension = np.asarray(cable_tension, dtype=float).reshape(-1)
@@ -1320,6 +1336,98 @@ class C_SRS_fixedEnd:
                 print("Converged at iteration {} with diff {}".format(i, diff))
                 break
         return cur_length, starting_vertices, Q_list_final
+
+    def IKD_minimize(self, target_ee_pos, starting_vertices, tol = 1e-3, show_info = False):
+        """Solve inverse kinematics by optimizing the cable lengths directly.
+
+        The objective is the squared Cartesian distance between the end
+        effector and ``target_ee_pos``.  Each objective evaluation runs the
+        static forward-kinematics solver from ``starting_vertices``.
+
+        Returns
+        -------
+        cable_length : ndarray, shape (nCable,)
+            Realized cable lengths in the optimized equilibrium.
+        final_vertices : ndarray, shape (num_vertices, 3)
+            Optimized equilibrium configuration.
+        """
+        target_ee_pos = np.asarray(target_ee_pos, dtype=float).reshape(-1)
+        if target_ee_pos.size != 3 or np.any(~np.isfinite(target_ee_pos)):
+            raise ValueError("target_ee_pos must contain three finite values.")
+
+        starting_vertices = np.asarray(starting_vertices, dtype=float)
+        if starting_vertices.shape[0] == 3*self.num_vertices:
+            starting_vertices = self.q_to_vertices(
+                starting_vertices.reshape(3*self.num_vertices)
+            )
+        elif starting_vertices.shape != (self.num_vertices, 3):
+            raise ValueError(
+                "starting_vertices should be either a 3n vector or an n by 3 array."
+            )
+        starting_vertices = starting_vertices.copy()
+
+        initial_length = np.asarray(
+            self.get_cable_length_bary(starting_vertices), dtype=float
+        )
+        evaluation_count = 0
+        cached_length = None
+        cached_vertices = None
+        cached_ee_pos = None
+
+        def forward_kinematics(cable_length):
+            nonlocal evaluation_count, cached_length, cached_vertices, cached_ee_pos
+            cable_length = np.asarray(cable_length, dtype=float)
+            if cached_length is not None and np.array_equal(
+                cable_length, cached_length
+            ):
+                return cached_vertices, cached_ee_pos
+
+            Q_list, _ = self.FKD_static_length(
+                starting_vertices, cable_length
+            )
+            vertices = self.q_to_vertices(Q_list[-1])
+            ee_pos = np.asarray(self.get_ee_pos(vertices), dtype=float)
+            evaluation_count += 1
+            cached_length = cable_length.copy()
+            cached_vertices = vertices
+            cached_ee_pos = ee_pos
+            return vertices, ee_pos
+
+        def objective_function(cable_length):
+            _, ee_pos = forward_kinematics(cable_length)
+            residual = ee_pos - target_ee_pos
+            return 0.5 * residual @ residual
+
+        result = minimize(
+            objective_function,
+            initial_length,
+            method="SLSQP",
+            bounds=[(np.finfo(float).eps, None)] * self.nCable,
+            jac="3-point",
+            tol=tol,
+            options={
+                "ftol": max(0.5 * tol**2, np.finfo(float).eps),
+                "finite_diff_rel_step": 1e-3,
+                "maxiter": 50,
+                "disp": show_info,
+            },
+        )
+
+        final_vertices, final_ee_pos = forward_kinematics(result.x)
+        final_length = np.asarray(
+            self.get_cable_length_bary(final_vertices), dtype=float
+        )
+        final_error = np.linalg.norm(final_ee_pos - target_ee_pos)
+
+        if show_info:
+            print(
+                f"IK minimize evaluations: {evaluation_count}, "
+                f"success: {result.success}, final error: {final_error:.7e}"
+            )
+            if not result.success:
+                print(f"Optimizer message: {result.message}")
+
+        return final_length, final_vertices
 
     def generate_ws(self, cable_length_ranges, total_number = 1000, saveFile = 'training_data_1.pkl'):
         def generate_ws_cl_input(cable_length_ranges, total_number):

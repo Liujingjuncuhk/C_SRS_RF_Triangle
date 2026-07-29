@@ -82,16 +82,20 @@ if __name__ == "__main__":
     #                            [0.23, 0.08, 0.04],
     #                            [0.26, 0.08, 0.03]]) # parallelogram
 
-    # ee_target_list = np.array([[0.26, 0.08, 0.03],
-    #                        [0.25, 0.08, 0.07],
-    #                        [0.23, 0.08, 0.08],
-    #                        [0.24, 0.08, 0.04],
-    #                        [0.26, 0.08, 0.03]]) # parallelogram (faked)
-
     ee_target_list = np.array([[0.26, 0.08, 0.03],
-                               [0.24, 0.06, 0.07],
-                               [0.24, 0.1, 0.07],
-                               [0.26, 0.08, 0.03]]) # triangle
+                           [0.25, 0.08, 0.07],
+                           [0.23, 0.08, 0.08],
+                           [0.24, 0.08, 0.04],
+                           [0.26, 0.08, 0.03]]) # parallelogram (faked)
+
+    # ee_target_list = np.array([[0.26, 0.08, 0.03],
+    #                            [0.24, 0.06, 0.07],
+    #                            [0.24, 0.1, 0.07],
+    #                            [0.26, 0.08, 0.03]]) # triangle
+
+    # ee_target_list = np.array([[0.26, 0.08, 0.03],
+    #                                [0.24, 0.06, 0.07],
+    #                                [0.24, 0.08, 0.07]]) # triangle half
 
     total_dis = get_total_dis(ee_target_list)
     print("total distance of the path:", total_dis)
@@ -112,11 +116,11 @@ if __name__ == "__main__":
             tcl = c_srs.ikModel.predict_cable_length(ee_target)
             Q_list, cable_tension = c_srs.FKD_static_length(starting_vert, tcl)
             starting_vert = c_srs.q_to_vertices(Q_list[-1])
-        cur_length, starting_vertices, Q_list = c_srs.IKD_single(ee_target, starting_vert,AA = False, tol=1e-3, show_info = 1)
-        # starting_vertices, cur_length, cable_tension = c_srs.IKD_force(ee_target, starting_vert,cable_tension, show_info= 1)
-        length_cmd_list.append(cur_length)
-        vert_list.append(starting_vertices)
+        final_length, final_vertices = c_srs.IKD_minimize(ee_target, starting_vert, show_info=1)
+        length_cmd_list.append(final_length)
+        vert_list.append(final_vertices)
+        starting_vert = final_vertices
     # save the length_cmd_list and vert_list to a pickle file
     dump_data = {'target_list': dense_targets, 'length_cmd_list': length_cmd_list, 'vert_list': vert_list}
-    with open('data/IKD_traj_result_triangle.pkl', 'wb') as f:
+    with open('data/IKD_traj_result_paral_new.pkl', 'wb') as f:
         pickle.dump(dump_data, f)
