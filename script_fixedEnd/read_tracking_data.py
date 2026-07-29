@@ -105,6 +105,8 @@ def get_tracking_ball_pos(filename, cut_time):
 
     return np.asarray(positions, dtype=float).reshape(-1, 3)
 
+def get_ee_pos_from_2_balls(filename, cut_time):
+    pass
 
 def plot_tracking_ball_trajectory(positions, save_path=None, show=True):
     """Draw a 3D trajectory from an (N, 3) position array."""
