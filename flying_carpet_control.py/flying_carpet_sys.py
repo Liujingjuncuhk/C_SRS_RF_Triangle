@@ -32,8 +32,8 @@ class Flying_carpet_sys():
         self.initial_motor_pos = self.motor_driver.read_positions()
         self.nCable = self.robot.nCable
         self.cur_cable_length = self.get_cur_length()
-        Q_list_all, self.starting_vertices, cable_tension = self.robot.FKD_time(self.cur_cable_length, 10, self.robot.vertices)
-        self.robot.visualize_vert(self.starting_vertices)
+        # Q_list_all, self.starting_vertices, cable_tension = self.robot.FKD_time(self.cur_cable_length, 10, self.robot.vertices)
+        # self.robot.visualize_vert(self.starting_vertices)
 
     def get_cur_length(self):
         cur_motor_pos = self.motor_driver.read_positions()

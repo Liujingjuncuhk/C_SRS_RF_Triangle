@@ -68,7 +68,7 @@ if __name__ == "__main__":
     # print(cl_list)
     # time_list_ori = [0,2,4,6,8,10,12,14,16,18,20,22]
 
-    time_ratio = 1
+    time_ratio = 0.3
     time_list = [t * time_ratio for t in time_list_ori]
 
     execute_traj(flying_carpet_sys, cl_list, time_list)
