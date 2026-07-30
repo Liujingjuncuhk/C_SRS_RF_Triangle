@@ -30,8 +30,8 @@ class FixedEndSystem:
         self.motor_controller = FeetechUDPDriver()
         self.camera = FixedEndCamera()
         self.nCable = 6
-        self.calibrated_motor_pos = [2048, 1934, 2048, 2048, 2048, 2048]
-        self.calibrated_cable_length = (np.array([437, 445, 442, 292, 272, 287])*1e-3).tolist()  # Default calibrated lengths in meters
+        self.calibrated_motor_pos = [2048, 1934, 1932, 2048, 2048, 2048]
+        self.calibrated_cable_length = (np.array([437, 445, 436, 292, 272, 287])*1e-3).tolist()  # Default calibrated lengths in meters
         self.default_speed = 0.01
         self.stepPerm = 4096/(0.05*np.pi)
         self.mPerStep = 1/self.stepPerm

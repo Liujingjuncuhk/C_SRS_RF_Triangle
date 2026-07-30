@@ -9,7 +9,8 @@ import matplotlib.pyplot as plt
 from scipy.interpolate import CubicSpline
 
 filtered_region = [0.02, 0.3, 0, 0.16, -0.1, 0.2]
-traj_file = 'data/IKD_traj_result_triangle.pkl'
+# traj_file = 'data/IKD_traj_result_triangle_half_mirror_smoothed.pkl'
+traj_file = 'data/IKD_traj_result_paral_new.pkl'
 def get_t_list(target_list, total_time):
     cartesian_dist_list = []
     total_cartesian_dist = 0
@@ -169,13 +170,14 @@ if __name__ == "__main__":
     with open(traj_file, 'rb') as f:
         cl_data = pickle.load(f)
         target_list = cl_data['target_list']
+        target_list = np.array(target_list)
         length_cmd_list = cl_data['length_cmd_list']
         vert_list = cl_data['vert_list']
     
     # print("length of length cmd list: ", len(length_cmd_list))
     # print("length of ", len(length_cmd_list[0]))
 
-    planned_total_time = 20
+    planned_total_time = 10
 
 
     # t_list range from 0 to total_time, with length same as nSample

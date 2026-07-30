@@ -294,7 +294,7 @@ if __name__ == "__main__":
     # tp[0] += 4000
     # feetech_driver.move_to_position(tp, [500 for _ in range(6)])
 
-    pos = [2048 for _ in range(6)]
+    # pos = [2048 for _ in range(6)]
 
     # feetech_driver.move_to_position(pos, [500 for _ in range(6)])
     # input("Press Enter to return to initial positions...")
