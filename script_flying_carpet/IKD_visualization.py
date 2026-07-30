@@ -73,12 +73,13 @@ def visualize_IKD_paper_1(flying_carpet: Flying_carpet, tar_ee_interpolated, ver
 if __name__ == "__main__":
     description_file = "./models/flying_carpet/flying_carpet_description_bary.pkl"
     flying_carpet = Flying_carpet(description_file)
-    with open("./data_flying_carpet/IK_trajectory_results.pkl", "rb") as f:
+    with open("./data_flying_carpet/IK_trajectory_results_timed.pkl", "rb") as f:
         data = pickle.load(f)
     tar_ee_interpolated = data['traj_ee_interpolated']
-    tar_ee_interpolated = interpolate_trajectory(tar_ee_interpolated, num_points=10)
-    print("length of tar_ee_interpolated: ", len(tar_ee_interpolated))
+    # tar_ee_interpolated = interpolate_trajectory(tar_ee_interpolated, num_points=10)
+    # print("length of tar_ee_interpolated: ", len(tar_ee_interpolated))
     vert_interpolated = data['vert_list']
-    vert_interpolated = interpolate_trajectory(vert_interpolated, num_points=10)
+    
+    # vert_interpolated = interpolate_trajectory(vert_interpolated, num_points=10)
     visualize_IKD_paper_1(flying_carpet, tar_ee_interpolated, vert_interpolated)
     # temp_script(flying_carpet, "./data_flying_carpet/IK_trajectory_results.pkl")

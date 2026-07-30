@@ -31,7 +31,7 @@ class FixedEndSystem:
         self.camera = FixedEndCamera()
         self.nCable = 6
         self.calibrated_motor_pos = [2048, 1934, 1932, 2048, 2048, 2048]
-        self.calibrated_cable_length = (np.array([437, 445, 436, 292, 272, 287])*1e-3).tolist()  # Default calibrated lengths in meters
+        self.calibrated_cable_length = (np.array([437, 445, 437, 292, 272, 287])*1e-3).tolist()  # Default calibrated lengths in meters
         self.default_speed = 0.01
         self.stepPerm = 4096/(0.05*np.pi)
         self.mPerStep = 1/self.stepPerm
@@ -186,6 +186,7 @@ class FixedEndSystem:
             return
 
         start_time = time.monotonic()
+        delta = 1e-3
         for i in range(1, len(time_stamp)):
             prev_lengths = traj_length[i - 1]
             target_lengths = traj_length[i]
@@ -195,8 +196,11 @@ class FixedEndSystem:
 
             next_time = start_time + time_stamp[i]
             remaining = next_time - time.monotonic()
-            if remaining > 0:
-                time.sleep(remaining)
+            if remaining > delta:
+                time.sleep((remaining - delta))
+            while time.monotonic() < next_time:
+                pass
+
 
     def close(self):
         if hasattr(self, "camera") and self.camera is not None:
