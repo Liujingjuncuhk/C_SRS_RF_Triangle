@@ -5,6 +5,7 @@ import pyvista as pv
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 from scipy.linalg import lu_factor, lu_solve
+from scipy.optimize import minimize
 import torch
 import torch.nn as nn
 import joblib
@@ -604,10 +605,10 @@ class Flying_carpet:
             ee_poses = self.get_ee_poses(Q)
             diff = 1/2*np.linalg.norm(ee_poses - target_EE_pos)**2
             return diff
-        
+
         def get_diff_cartesian(Q):
             ee_poses = self.get_ee_poses(Q)
-            diff = 0 
+            diff = 0
             for i in range(len(self.ee_idx)):
                 diff += np.linalg.norm(ee_poses[i] - target_EE_pos[i])
             diff = diff / len(self.ee_idx)
@@ -628,7 +629,7 @@ class Flying_carpet:
         if initial_guess:
             starting_vertices = self.get_fixedEE_guess_vertices(target_EE_pos)
             cur_length = self.get_cable_length_bary(starting_vertices)
-            Q_list, starting_vertices, cable_tension = self.FKD_time(cur_length, 10, starting_vertices, tol = 5e-5, h = 0.01, show_info=False)
+            Q_list, starting_vertices, cable_tension = self.FKD_time(cur_length, 5, starting_vertices, tol = 5e-5, h = 0.01, show_info=False)
             # self.visualize_vert(starting_vertices)
         Q = self.vertices_to_q(starting_vertices)
         final_Q_list = [Q.copy()]
@@ -655,20 +656,231 @@ class Flying_carpet:
             cmd_diff = clamp_diff(cmd_diff, min_bound = 1e-3, max_bound = 0.05)
             for k in range(self.nCable):
                 cmd_length[k] += cmd_diff[k]
-            Q_list, starting_vertices, cable_tension = self.FKD_time(cmd_length, 10, Q, tol = 1e-4, h = 0.01)
+            Q_list, starting_vertices, cable_tension = self.FKD_time(cmd_length, 5, Q, tol = 1e-4, h = 0.01)
             
             # self.visualize_IKD_result(target_EE_pos, starting_vertices)
             # input("Press Enter to continue...")
             Q = self.vertices_to_q(starting_vertices)
             final_Q_list.append(Q.copy())
             diff_cart = get_diff_cartesian(Q)
+            diff = get_diff(Q)
             if show_info:
                 print("Iteration {}: diff = {}, diff_cart = {}, dl = {}, Jacobian: {}, cable_tension: {}, cmd_diff: {}".format(i, diff, diff_cart, dl, np.round(jac, 5), np.round(cable_tension, 5), np.round(cmd_diff, 5)))
-            if diff_cart < tol:
+            if diff < tol:
                 print("Converged at iteration {} with diff {}".format(i, diff))
                 break
             cur_length = self.get_cable_length_bary(Q)
         return cur_length, starting_vertices, final_Q_list
+
+    def IKD_single_FD(self, target_EE_pos, starting_vertices, tol = 1e-3, max_iter = 500, show_info = False, initial_guess = True):
+        if starting_vertices.shape[0] == 3*self.num_vertices:
+            Q = starting_vertices.copy()
+        elif starting_vertices.shape[0] == self.num_vertices:
+            Q = self.vertices_to_q(starting_vertices)
+        def get_diff(Q):
+            ee_poses = self.get_ee_poses(Q)
+            diff = 1/2*np.linalg.norm(ee_poses - target_EE_pos)**2
+            return diff
+
+        def get_diff_cartesian(Q):
+            ee_poses = self.get_ee_poses(Q)
+            diff = 0
+            for i in range(len(self.ee_idx)):
+                diff += np.linalg.norm(ee_poses[i] - target_EE_pos[i])
+            diff = diff / len(self.ee_idx)
+            return diff
+
+        def get_jacobian_FD(Q, cur_length, diff, delta=1e-3):
+            """Finite-difference the IK objective with respect to cable commands."""
+            jacobian_FD = np.zeros((self.nCable,))
+            for cable_idx in range(self.nCable):
+                perturbed_length = cur_length.copy()
+                # Shortening the cable keeps the unilateral constraint active.
+                cable_delta = min(delta, 0.5 * cur_length[cable_idx])
+                perturbed_length[cable_idx] -= cable_delta
+                _, perturbed_vertices, _ = self.FKD_time(
+                    perturbed_length, 10, Q, tol=1e-4, h=0.01,
+                    show_info=False
+                )
+                perturbed_Q = self.vertices_to_q(perturbed_vertices)
+                jacobian_FD[cable_idx] = (
+                    diff - get_diff(perturbed_Q)
+                ) / cable_delta
+            return jacobian_FD
+
+        if initial_guess:
+            starting_vertices = self.get_fixedEE_guess_vertices(target_EE_pos)
+            cur_length = self.get_cable_length_bary(starting_vertices)
+            Q_list, starting_vertices, cable_tension = self.FKD_time(cur_length, 10, starting_vertices, tol = 5e-5, h = 0.01, show_info=False)
+        Q = self.vertices_to_q(starting_vertices)
+        final_Q_list = [Q.copy()]
+        for i in range(max_iter):
+            dl = 0.1
+            diff = get_diff(Q)
+            cur_length = self.get_cable_length_bary(Q)
+            jac_FD = get_jacobian_FD(Q, cur_length, diff)
+            cmd_diff = np.zeros((self.nCable,))
+            cmd_length = cur_length.copy()
+            for k in range(self.nCable):
+                if i > 0 and cable_tension[k] < 1e-5 and jac_FD[k] < 0:
+                    continue
+                cmd_diff[k] = -dl * jac_FD[k]
+
+            cmd_diff = np.asarray(
+                clamp_diff(cmd_diff, min_bound=1e-3, max_bound=0.05)
+            )
+            cmd_length += cmd_diff
+            _, starting_vertices, cable_tension = self.FKD_time(
+                cmd_length, 10, Q, tol=1e-4, h=0.01
+            )
+
+            Q = self.vertices_to_q(starting_vertices)
+            final_Q_list.append(Q.copy())
+            diff_cart = get_diff_cartesian(Q)
+            if show_info:
+                print(
+                    "Iteration {}: diff = {}, diff_cart = {}, dl = {}, "
+                    "FD gradient: {}, cable_tension: {}, cmd_diff: {}".format(
+                        i, diff, diff_cart, dl, np.round(jac_FD, 5),
+                        np.round(cable_tension, 5), np.round(cmd_diff, 5)
+                    )
+                )
+            if diff_cart < tol:
+                print("Converged at iteration {} with diff {}".format(i, diff))
+                break
+
+        cur_length = self.get_cable_length_bary(Q)
+        return cur_length, starting_vertices, final_Q_list
+
+    def IKD_single_minimize(self, target_EE_pos, starting_vertices, tol = 1e-3, max_iter = 500, show_info = False, initial_guess = True):
+        """Solve IK by minimizing EE error over the commanded cable lengths.
+
+        Each objective evaluation settles the model with ``FKD_time``.  SciPy
+        estimates the optimization gradient using three-point finite
+        differences.
+        """
+        target_EE_pos = np.asarray(target_EE_pos, dtype=float)
+        expected_target_shape = (len(self.ee_idx), 3)
+        if target_EE_pos.shape != expected_target_shape:
+            raise ValueError(
+                f"target_EE_pos must have shape {expected_target_shape}."
+            )
+        if np.any(~np.isfinite(target_EE_pos)):
+            raise ValueError("target_EE_pos must contain finite values.")
+        if not np.isfinite(tol) or tol <= 0.0:
+            raise ValueError("tol must be a finite positive value.")
+        if not isinstance(max_iter, (int, np.integer)) or max_iter <= 0:
+            raise ValueError("max_iter must be a positive integer.")
+
+        starting_vertices = np.asarray(starting_vertices, dtype=float)
+        if (
+            starting_vertices.ndim in (1, 2)
+            and starting_vertices.shape[0] == 3*self.num_vertices
+            and starting_vertices.size == 3*self.num_vertices
+        ):
+            starting_vertices = self.q_to_vertices(
+                starting_vertices.reshape(3*self.num_vertices)
+            )
+        elif starting_vertices.shape != (self.num_vertices, 3):
+            raise ValueError(
+                "starting_vertices should be either a 3n vector or an n by 3 "
+                "array."
+            )
+        if np.any(~np.isfinite(starting_vertices)):
+            raise ValueError("starting_vertices must contain finite values.")
+        starting_vertices = starting_vertices.copy()
+
+        if initial_guess:
+            starting_vertices = self.get_fixedEE_guess_vertices(target_EE_pos)
+            initial_length = np.asarray(
+                self.get_cable_length_bary(starting_vertices), dtype=float
+            )
+            _, starting_vertices, _ = self.FKD_time(
+                initial_length, 10, starting_vertices, tol=5e-5, h=0.01,
+                show_info=False
+            )
+
+        initial_length = np.asarray(
+            self.get_cable_length_bary(starting_vertices), dtype=float
+        )
+        evaluation_count = 0
+        cached_length = None
+        cached_vertices = None
+        cached_ee_poses = None
+        final_Q_list = [self.vertices_to_q(starting_vertices).copy()]
+
+        def forward_kinematics(cable_length):
+            nonlocal evaluation_count
+            nonlocal cached_length, cached_vertices, cached_ee_poses
+            cable_length = np.asarray(cable_length, dtype=float)
+            if (
+                cached_length is not None
+                and np.array_equal(cable_length, cached_length)
+            ):
+                return cached_vertices, cached_ee_poses
+
+            _, vertices, _ = self.FKD_time(
+                cable_length, 5, starting_vertices, tol=1e-4, h=0.01,
+                show_info=False
+            )
+            ee_poses = np.asarray(self.get_ee_poses(vertices), dtype=float)
+            evaluation_count += 1
+            cached_length = cable_length.copy()
+            cached_vertices = vertices.copy()
+            cached_ee_poses = ee_poses
+            if show_info:
+                print(
+                    f"Minimize FK evaluation {evaluation_count}, "
+                    f"objective={0.5 * np.sum((ee_poses-target_EE_pos)**2):.6e}",
+                    flush=True,
+                )
+            return cached_vertices, cached_ee_poses
+
+        def objective_function(cable_length):
+            _, ee_poses = forward_kinematics(cable_length)
+            residual = (ee_poses - target_EE_pos).reshape(-1)
+            return 0.5 * residual @ residual
+
+        def save_iteration(cable_length):
+            vertices, _ = forward_kinematics(cable_length)
+            final_Q_list.append(self.vertices_to_q(vertices).copy())
+
+        result = minimize(
+            objective_function,
+            initial_length,
+            method="SLSQP",
+            bounds=[(np.finfo(float).eps, None)] * self.nCable,
+            jac="3-point",
+            callback=save_iteration,
+            tol=tol,
+            options={
+                "ftol": max(0.5 * tol**2, np.finfo(float).eps),
+                "finite_diff_rel_step": 1e-3,
+                "maxiter": max_iter,
+                "disp": show_info,
+            },
+        )
+
+        final_vertices, final_ee_poses = forward_kinematics(result.x)
+        final_Q = self.vertices_to_q(final_vertices)
+        if not np.array_equal(final_Q_list[-1], final_Q):
+            final_Q_list.append(final_Q.copy())
+        final_length = np.asarray(
+            self.get_cable_length_bary(final_vertices), dtype=float
+        )
+        final_error = np.mean(
+            np.linalg.norm(final_ee_poses - target_EE_pos, axis=1)
+        )
+
+        if show_info:
+            print(
+                f"IK minimize evaluations: {evaluation_count}, "
+                f"success: {result.success}, final error: {final_error:.7e}"
+            )
+            if not result.success:
+                print(f"Optimizer message: {result.message}")
+
+        return final_length, final_vertices, final_Q_list
 
     def get_fixedEE_guess_vertices(self, target_EE_pos, show_info = False):
         def assemble_K_tilde(Q):
