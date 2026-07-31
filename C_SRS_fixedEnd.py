@@ -1020,6 +1020,16 @@ class C_SRS_fixedEnd:
 
         return Q_list, cable_tension
 
+
+    def FKD_get_residual(self, Q, cable_tension):
+        _, R_list_1818 = self.get_R_list(self.q_to_vertices(Q))
+        K_tilde, f0_tilde, K_tilde_vec2add = self.assemble_K_tilde(R_list_1818)
+        Q_moving = self.q_to_q_moving(Q)
+        rhs = f0_tilde + self.q_to_q_moving(self.gravity_vec) + K_tilde_vec2add + (-self.get_cable_Jacobian_bary(Q)[:, self.moving_dof_idx]).T @ cable_tension
+        residual = K_tilde @ Q_moving - rhs
+        return residual
+
+
     def FKD_trajectory(self, cl_list, time_list):
         pass
 

@@ -65,10 +65,10 @@ def visualize_IKD_paper_1(flying_carpet: Flying_carpet, tar_ee_interpolated, ver
     # add axes and grid
     plotter.show_axes()
     plotter.show_grid()
-    plotter.show()
-    # plotter.show(auto_close=False)
-    # plotter.screenshot("./data_flying_carpet/IKD_illustration_paper_1.png")
-    # plotter.close()
+    # plotter.show()
+    plotter.show(auto_close=False)
+    plotter.screenshot("./data_flying_carpet/IKD_illustration_paper_1.png")
+    plotter.close()
 
 if __name__ == "__main__":
     description_file = "./models/flying_carpet/flying_carpet_description_bary.pkl"

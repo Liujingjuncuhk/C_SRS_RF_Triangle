@@ -17,7 +17,9 @@ import pickle
 
 
 # translation_2add = np.array([0.03608945, 0.2295359,  0.0021551])
-translation_2add = np.array([0.03305734, 0.23004783, 0.00180389])
+# translation_2add = np.array([0.03305734, 0.23004783, 0.00180389])
+# translation_2add = np.array([0.03774099, 0.23722098, -0.01111977])
+translation_2add = np.array([0.03762123, 0.23733986, -0.00781202])
 # translation_2add = np.array([0.03166899, 0.23057712, 0.00117929])
 
 def get_dense_target(target_list, nSample):
@@ -334,14 +336,13 @@ def plot_target_record_3d(target_list, ee_positions_recorded, save_path=None, sh
 
     return figure, ax
 
-def find_good_translation(c_srs: C_SRS_fixedEnd, vert_list, tracking_ball_positions):
+def find_good_translation(c_srs: C_SRS_fixedEnd, dense_target, tracking_ball_positions):
     tbp_sim_list = []
-    for i in range(len(vert_list)):
-        vert = vert_list[i]
-        expected_tb = c_srs.get_tracker_pos(vert)
+    for i in range(len(dense_target)):
+        expected_tb = dense_target[i]
         tbp_sim_list.append(expected_tb)
 
-    tbp_sim_list = get_dense_target(tbp_sim_list, len(tracking_ball_positions))
+    # tbp_sim_list = get_dense_target(tbp_sim_list, len(tracking_ball_positions))
     # find the average translation between tbp_sim_list and tracking_ball_position
     translation_list = []
     for i in range(len(tbp_sim_list)):
@@ -359,19 +360,136 @@ def get_initial_translation(c_srs: C_SRS_fixedEnd, tracking_ball_positions, vert
     print("translation to be added: ", diff)
     return diff
         
+def get_tracking_ball_pos_new(
+    tracking_file, cut_time=0.0, cutoff_frequency=3.0, filter_order=2
+):
+    """Return the mean position of the two markers in a tracking CSV.
+
+    Marker coordinates are read from Excel columns Q:S and U:W.  Samples are
+    retained from the first timestamp through ``cut_time`` seconds (inclusive).
+
+    Args:
+        tracking_file: Path to the tracking CSV file.
+        cut_time: Number of seconds to retain, starting at the first timestamp.
+        cutoff_frequency: Low-pass cutoff frequency in Hz.
+        filter_order: Order of the Butterworth low-pass filter.
+
+    Returns:
+        A float NumPy array with shape (number_of_samples, 3).
+    """
+    if cut_time < 0:
+        raise ValueError("cut_time must be non-negative")
+    if cutoff_frequency <= 0:
+        raise ValueError("cutoff_frequency must be positive")
+    if filter_order < 1:
+        raise ValueError("filter_order must be at least 1")
+
+    positions = []
+    timestamps = []
+    with open(tracking_file, "r", newline="", encoding="utf-8-sig") as csv_file:
+        reader = csv.reader(csv_file)
+        try:
+            header = next(reader)
+        except StopIteration:
+            raise ValueError(f"Tracking data file is empty: {tracking_file}")
+
+        stripped_header = [column.strip() for column in header]
+        try:
+            time_column = stripped_header.index("Time [sec]")
+        except ValueError as error:
+            raise ValueError(
+                f"CSV does not contain a Time [sec] column: {tracking_file}"
+            ) from error
+
+        # Zero-based indices for Excel columns Q:S and U:W.
+        marker_1_columns = slice(16, 19)
+        marker_2_columns = slice(20, 23)
+        if len(header) < marker_2_columns.stop:
+            raise ValueError(
+                f"CSV does not contain marker positions in columns Q:S and U:W: "
+                f"{tracking_file}"
+            )
+
+        start_time = None
+        for row_number, row in enumerate(reader, start=2):
+            if not row or all(not value.strip() for value in row):
+                continue
+            if len(row) < marker_2_columns.stop or len(row) <= time_column:
+                raise ValueError(
+                    f"Row {row_number} does not contain the required columns"
+                )
+
+            try:
+                timestamp = float(row[time_column])
+            except ValueError as error:
+                raise ValueError(
+                    f"Invalid timestamp on row {row_number}: {row[time_column]}"
+                ) from error
+
+            if start_time is None:
+                start_time = timestamp
+            if timestamp - start_time > cut_time:
+                break
+
+            try:
+                marker_1 = np.asarray(row[marker_1_columns], dtype=float)
+                marker_2 = np.asarray(row[marker_2_columns], dtype=float)
+            except ValueError as error:
+                raise ValueError(
+                    f"Invalid marker position on row {row_number}"
+                ) from error
+
+            positions.append((marker_1 + marker_2) / 2.0)
+            timestamps.append(timestamp)
+
+    positions = np.asarray(positions, dtype=float).reshape(-1, 3)
+    timestamps = np.asarray(timestamps, dtype=float)
+    if positions.shape[0] < 2:
+        return positions
+
+    time_steps = np.diff(timestamps)
+    if np.any(time_steps <= 0):
+        raise ValueError("Tracking timestamps must be strictly increasing")
+
+    sample_frequency = 1.0 / np.median(time_steps)
+    nyquist_frequency = sample_frequency / 2.0
+    if cutoff_frequency >= nyquist_frequency:
+        raise ValueError(
+            f"cutoff_frequency ({cutoff_frequency} Hz) must be below the "
+            f"Nyquist frequency ({nyquist_frequency:.3f} Hz)"
+        )
+
+    from scipy.signal import butter, sosfiltfilt
+
+    low_pass_filter = butter(
+        filter_order,
+        cutoff_frequency,
+        btype="lowpass",
+        fs=sample_frequency,
+        output="sos",
+    )
+
+    # sosfiltfilt needs enough samples for its edge padding. For very short
+    # cut times, returning the unfiltered samples is more useful than failing.
+    default_pad_length = 3 * (2 * len(low_pass_filter) + 1)
+    if positions.shape[0] <= default_pad_length:
+        return positions
+
+    return sosfiltfilt(low_pass_filter, positions, axis=0)
 
 if __name__ == "__main__":
-    traj_file = 'data/IKD_traj_result_triangle.pkl'
+    # traj_file = 'data/IKD_traj_result_paral_new.pkl'
+    traj_file = 'data/IKD_traj_result_triangle_half_mirror_smoothed.pkl'
     description_file = "./models/flat_tri_surface/C_SRS_description_bary.pkl"
     c_srs = C_SRS_fixedEnd(description_file)
-    cut_time = 5.0
+    cut_time = 5
     project_dir = Path(__file__).resolve().parent.parent
 
     tracking_file = (
-        project_dir / "data_tracking_ball" / "test_260725_tri_5_000.csv"
+        project_dir / "data_tracking_ball_0731" / "test_0731_tri_5_000.csv"
     )
     
-    tracking_ball_positions = get_tracking_ball_pos(
+    tracking_ball_positions = get_tracking_ball_pos_new(
         tracking_file,
         cut_time=cut_time,
     )
@@ -381,7 +499,9 @@ if __name__ == "__main__":
         target_list = cl_data['target_list']
         length_cmd_list = cl_data['length_cmd_list']
         vert_list = cl_data['vert_list']
-    # find_good_translation(c_srs, vert_list, tracking_ball_positions)
+    dense_target = get_dense_target(target_list, tracking_ball_positions.shape[0])
+    # plot_target_record_3d(dense_target, tracking_ball_positions, show=True)
+    # find_good_translation(c_srs, dense_target, tracking_ball_positions)
     # exit(0)
     # target_list = np.array([[0.26, 0.08, 0.03],
     #                            [0.25, 0.08, 0.07],
@@ -394,17 +514,16 @@ if __name__ == "__main__":
     #                            [0.24, 0.1, 0.07],
     #                            [0.26, 0.08, 0.03]]) # triangle
 
+    # translation_2add = get_initial_translation(c_srs, tracking_ball_positions, vert_list)
     tracking_ball_positions = tracking_ball_positions + translation_2add
-    interpolated_normvecs = get_dense_normvec(c_srs, vert_list, tracking_ball_positions)
-    ee_positions_recorded = get_ee_trackingball(c_srs, tracking_ball_positions, interpolated_normvecs)
-    dense_target = get_dense_target(target_list, ee_positions_recorded.shape[0])
-    plot_target_record_3d(dense_target, ee_positions_recorded, show=False)
-    plot_xyz_target(dense_target, ee_positions_recorded, cut_time, show=False)
+    dense_target = get_dense_target(target_list, tracking_ball_positions.shape[0])
+    plot_target_record_3d(dense_target, tracking_ball_positions, show=False)
+    plot_xyz_target(dense_target, tracking_ball_positions, cut_time, show=False)
     plt.show()
 
-    data_2save = {"traj": "triangle","cut_time": cut_time, "target_list": target_list,"dense_target": dense_target, "ee_positions_recorded": ee_positions_recorded}
+    data_2save = {"traj": "triangle","cut_time": cut_time, "target_list": target_list,"dense_target": dense_target, "ee_positions_recorded": tracking_ball_positions}
     
-    with open("data_tracking_ball/triangle_data_5s.pkl", "wb") as f:
+    with open("data_tracking_ball_0731/tri_data_5s.pkl", "wb") as f:
         pickle.dump(data_2save, f)
 
     

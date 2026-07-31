@@ -24,7 +24,15 @@ pickleFile_name = ["data_tracking_ball/parallelogram_data_30s.pkl",
                    "data_tracking_ball/triangle_data_10s.pkl",
                    "data_tracking_ball/triangle_data_5s.pkl"]
 
-ratio_list = [0.5, 0.2, 0.1, 0., 0.1, 0.1, 0.1, 0.1]
+pickleFile_name = [
+                   "data_tracking_ball_0731/tri_data_30s.pkl",
+                   "data_tracking_ball_0731/tri_data_20s.pkl",
+                   "data_tracking_ball_0731/tri_data_10s.pkl",
+                   "data_tracking_ball_0731/tri_data_5s.pkl"]
+
+# ratio_list = [0.5, 0.2, 0.1, 0., 0.1, 0.1, 0.1, 0.1]
+ratio_list = [0.16, 0.13, 0.1, 0.1]
+
 
 
 ranges_list = [[0.225, 0.265], [0.055, 0.105], [0.025, 0.085]]
@@ -212,6 +220,6 @@ if __name__ == "__main__":
         diff_list, diff_mean = get_ave_diff(dense_target, ee_pos_polished)
         print("mean diff:", diff_mean)
         # draw_target_w_mesh(c_srs, dense_target, ee_pos_polished)
-        # plot_xyz_target(dense_target, ee_pos_polished, total_time)
-        # draw_diff_list(diff_list, total_time)
+        plot_xyz_target(dense_target, ee_pos_polished, total_time)
+        draw_diff_list(diff_list, total_time)
         
