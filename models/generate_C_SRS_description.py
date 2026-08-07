@@ -602,8 +602,8 @@ def generate_C_SRS_description_bary(mesh_vertices, mesh_triangles, pullpoint_loc
     """
     k_m = Youngs_modulus * thickness / (1 - Poisson_ratio ** 2)
     k_b = Youngs_modulus * thickness ** 3 / (12 * (1 - Poisson_ratio ** 2))
-    # k_m = 1
-    # k_b = 1
+    k_m = 1
+    k_b = 1
 
     pp_bary_tri_idx = []
     pp_bary_coords = []

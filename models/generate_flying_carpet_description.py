@@ -643,7 +643,8 @@ def build_bending_elements(mesh_vertices, mesh_triangles, k_bend=1.0):
         AA = 0.5 * Le * hA
         AB = 0.5 * Le * hB
         Abar = (AA + AB) / 3.0
-        w_e = k_bend * 3.0 * Le * Le / Abar
+        # w_e = k_bend * 3.0 * Le * Le / Abar
+        w_e = k_bend/(2*Abar) 
  
         edge_vertices.append([v1, v2, v3, v4])
         c_val_matrix.append([c1, c2, c3, c4])
@@ -664,8 +665,9 @@ def generate_L_list(mesh_vertices, mesh_triangles):
     return L_list
 
 def generate_C_SRS_description(mesh_vertices, mesh_triangles, pullpoint_locations, ee_locations, pulley_locations, density, thickness, Youngs_modulus, Poisson_ratio):
-    # k_m = Youngs_modulus * thickness / (1 - Poisson_ratio**2)
-    # k_b = Youngs_modulus * thickness**3 / (12 * (1 - Poisson_ratio**2))
+    k_m = Youngs_modulus * thickness / (1 - Poisson_ratio**2)
+    k_b = Youngs_modulus * thickness**3 / (12 * (1 - Poisson_ratio**2))
+    # print("kb/km ratio:", np.sqrt(k_b / k_m))
     k_m = 1
     k_b = 1
 
@@ -697,6 +699,7 @@ def generate_C_SRS_description(mesh_vertices, mesh_triangles, pullpoint_location
     area_list = cal_area_list(mesh_vertices, mesh_triangles)
     L_list = generate_L_list(mesh_vertices, mesh_triangles)
     mem_weight_list = [k_m * area_list[i] for i in range(len(mesh_triangles))]
+    # mem_weight_list = [k_m for i in range(len(mesh_triangles))]
 
     initial_SK_list = get_ARAP_initial_SK_list(mesh_vertices, mesh_triangles, edge_list, weight_list, neighbour_list, neighbour_edge_list)
     stiffness_matrices = []

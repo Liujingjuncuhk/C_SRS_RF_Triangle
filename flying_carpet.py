@@ -2197,6 +2197,8 @@ class Flying_carpet:
 if __name__ == "__main__":
     description_file = "./models/flying_carpet/flying_carpet_description_bary.pkl"
     flying_carpet = Flying_carpet(description_file)
+    flying_carpet.visualize_vert(flying_carpet.vertices)
+    exit(0)
     icl = flying_carpet.initial_cable_length
     shortened_length = 0.04
     tcl = [icl[0]-shortened_length, icl[1]-shortened_length, icl[2]-shortened_length, icl[3]-shortened_length, icl[4], icl[5], icl[6], icl[7]]
