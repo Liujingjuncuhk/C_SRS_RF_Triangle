@@ -180,6 +180,40 @@ def plan_pick_place(flying_carpet:Flying_carpet):
         pickle.dump(data_2save, f)
 
 
+def plan_grasp_payload(flying_carpet:Flying_carpet):
+    filename = "./data_flying_carpet/60mm_centered.pkl"
+    with open(filename, 'rb') as f:
+        ee_pos_bent = pickle.load(f)
+    filename = "./data_flying_carpet/130mm_centered.pkl"
+    with open(filename, 'rb') as f:
+        ee_pos_grasping = pickle.load(f)
+    
+    ee_list = []
+    ee_list.append(add_translation(ee_pos_bent, [0.28, 0.38, 0.20]))
+    ee_list.append(add_translation(ee_pos_bent, [0.28, 0.38, 0.15]))
+    # ee_list.append(add_translation(ee_pos_bent, [0.28, 0.2, 0.15]))
+    ee_list.append(add_translation(ee_pos_grasping, [0.28, 0.38, 0.12]))
+    ee_list.append(add_translation(ee_pos_grasping, [0.28, 0.38, 0.2]))
+    cl_list = []
+    vert_list = []
+    for i in range(len(ee_list)):
+        ee_target_pos = ee_list[i]
+        # starting_vert = flying_carpet.get_fixedEE_guess_vertices(ee_target_pos)
+        # starting_length = flying_carpet.get_cable_length_bary(starting_vert)
+        # final_vert = starting_vert.copy()
+        # Q_list, final_vert, cable_tension = flying_carpet.FKD_time(starting_length, 10, starting_vert, tol = 1e-4, h = 0.1, show_info=True)
+        # final_length = flying_carpet.get_cable_length_bary(final_vert)
+        # starting_vertices = flying_carpet.vertices
+        final_length, final_vert, Q_list = flying_carpet.IKD_single(ee_target_pos, flying_carpet.vertices, max_iter=30, tol=8e-3, show_info = True, initial_guess=True)
+        cl_list.append(final_length)
+        vert_list.append(final_vert)
+        # starting_vertices = final_vert.copy()
+        flying_carpet.visualize_IKD_result(ee_target_pos, final_vert)
+
+    data_2save = {"ee_target_list": ee_list, "cl_list": cl_list, "vert_list": vert_list}
+    with open("data_flying_carpet/grasping_payload_test.pkl", "wb") as f:
+        pickle.dump(data_2save, f)
+
 def view_trajectory(flying_carpet: Flying_carpet, traj_file = "data_flying_carpet/pick_and_place_trajectory_tro_paper.pickle"):
     with open(traj_file, 'rb') as f:
         # Load the pick-and-place command list from the pickle file
@@ -225,6 +259,7 @@ def cal_trajectory_properties(flying_carpet: Flying_carpet, traj_file = "data_fl
 if __name__ == "__main__":
     description_file = "./models/flying_carpet/flying_carpet_description_bary.pkl"
     flying_carpet = Flying_carpet(description_file)
-    cal_trajectory_properties(flying_carpet)
+    # cal_trajectory_properties(flying_carpet)
+    plan_grasp_payload(flying_carpet)
     # plan_pick_place(flying_carpet)
     # view_trajectory(flying_carpet)
