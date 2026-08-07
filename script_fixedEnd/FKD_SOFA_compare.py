@@ -392,7 +392,7 @@ def measure_diff_surface(
     # )
 
     error_sorted = np.sort(errors)
-    percentile_95 = error_sorted[int(0.95 * len(error_sorted))]
+    percentile_95 = error_sorted[ : int(0.95 * len(error_sorted))]
 
     return errors, percentile_95
 
@@ -489,16 +489,16 @@ def draw_SOFA_compare(c_srs: C_SRS_fixedEnd):
         print("Difference between GT and FB points:", np.mean(diff), " 95 percentile: ", np.mean(diff_95))
         min_point = np.array([[0, -20, -100],
                               [300, 180, 100]]) * 1e-3
-        plotter.add_mesh(pv.PolyData(min_point), color='white', point_size=0.1)
+        # plotter.add_mesh(pv.PolyData(min_point), color='white', point_size=0.1)
 
-        # plotter.add_mesh(mesh_surface, color='lightblue', show_edges=True, opacity=0.35, label='Input Surface')
-        # plotter.add_mesh(mesh_fb, color='lightgrey', show_edges=True, label='FB Mid-Surface',opacity=0.85)
-        plotter.add_mesh(mesh_SOFA, color='lightgrey', show_edges=True, opacity=0.75, label='SOFA Surface')
-        # gt_pts = downsample_random(gt_pts, 1000, seed=42)
-        plotter.add_points(gt_pts, color='green', point_size=5, label='Ground Truth Points',opacity=0.85)
-        # plotter.add_points(fb_verts_SOFA, color='red', point_size=10, label='FB points from SOFA')
-        # plotter.show_grid()
-        plotter.show()
+        # # plotter.add_mesh(mesh_surface, color='lightblue', show_edges=True, opacity=0.35, label='Input Surface')
+        # # plotter.add_mesh(mesh_fb, color='lightgrey', show_edges=True, label='FB Mid-Surface',opacity=0.85)
+        # plotter.add_mesh(mesh_SOFA, color='lightgrey', show_edges=True, opacity=0.75, label='SOFA Surface')
+        # # gt_pts = downsample_random(gt_pts, 1000, seed=42)
+        # plotter.add_points(gt_pts, color='green', point_size=5, label='Ground Truth Points',opacity=0.85)
+        # # plotter.add_points(fb_verts_SOFA, color='red', point_size=10, label='FB points from SOFA')
+        # # plotter.show_grid()
+        # plotter.show()
 
 def read_VTK(file_path):
     """Read the vertices and tetrahedral connectivity from a VTK mesh.

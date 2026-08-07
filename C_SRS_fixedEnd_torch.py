@@ -385,7 +385,7 @@ class C_SRS_fixedEnd_torch(C_SRS_fixedEnd):
             if show_info:
                 print(f"static iteration {it+1}: diff={diff:.7e}, constraint={error:.7e}")
             if diff<tol and error<tol: break
-        return history,tension
+        return history, tension
 
     def FKD_free_static(self, show_info=False, tol=1e-6, max_iter=500):
         return self.FKD_static(self.vertices, np.zeros(self.nCable), tol=tol,
@@ -464,9 +464,10 @@ if __name__ == "__main__":
     icl = model.initial_cable_length.copy()
     tcl = [icl[0]-0.03, icl[1]-0.03, icl[2]-0.03, icl[3], icl[4], icl[5]]
     start_time = time.time()
-    Q_list, cable_tension = model.FKD_static_length(tcl, starting_vertices=model.vertices, show_info=False)
-    print(f"Static solve time: {time.time()-start_time:.3f} seconds")
-    start_time = time.time()
-    vert = model.deform_CG(tcl, model.vertices, max_iter=100, tol=1e-6, show_info=False)
+    # vert_cg = model.deform_CG(tcl, model.vertices, max_iter=100, tol=1e-6, show_info=False)
+    # Q_list, cable_tension = model.FKD_static_length(tcl, starting_vertices=model.vertices, show_info=False)
+    # print(f"Static solve time: {time.time()-start_time:.3f} seconds")
+    # start_time = time.time()
+    vert = model.deform_CG(tcl, model.vertices, max_iter=100, tol=1e-8, show_info=True)
     print(f"CG solve time: {time.time()-start_time:.3f} seconds")
     model.visualize_vert(vert)

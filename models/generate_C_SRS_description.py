@@ -602,6 +602,8 @@ def generate_C_SRS_description_bary(mesh_vertices, mesh_triangles, pullpoint_loc
     """
     k_m = Youngs_modulus * thickness / (1 - Poisson_ratio ** 2)
     k_b = Youngs_modulus * thickness ** 3 / (12 * (1 - Poisson_ratio ** 2))
+    # k_m = 1
+    # k_b = 1
 
     pp_bary_tri_idx = []
     pp_bary_coords = []
@@ -629,8 +631,8 @@ def generate_C_SRS_description_bary(mesh_vertices, mesh_triangles, pullpoint_loc
 
     neighbour_list, neighbour_edge_list = generate_neighbour_list(mesh_triangles, len(mesh_vertices), edge_list)
     area_list = cal_area_list(mesh_vertices, mesh_triangles)
-    L_list = generate_L_list(mesh_vertices, mesh_triangles)
-    mem_weight_list = [k_m * area_list[i] / (L_list[i] ** 2) for i in range(len(mesh_triangles))]
+    # L_list = generate_L_list(mesh_vertices, mesh_triangles)
+    mem_weight_list = [k_m * area_list[i] for i in range(len(mesh_triangles))]
 
     initial_SK_list = get_ARAP_initial_SK_list(mesh_vertices, mesh_triangles, edge_list, weight_list, neighbour_list, neighbour_edge_list)
     stiffness_matrices = []
@@ -732,7 +734,7 @@ def generate_C_SRS_description(mesh_vertices, mesh_triangles, pullpoint_location
         stiffness_matrices.append(K)
     mass_mat = cal_mass_matrix(mesh_vertices, mesh_triangles, density, thickness)
     visualize_3d_mesh(mesh_vertices, mesh_triangles, pp_idx, pulley_locations, ee_idx)
-    with open(folder + "C_SRS_description_bary.pkl", "wb") as f:
+    with open(folder + "C_SRS_description_bary_sparse.pkl", "wb") as f:
         pickle.dump({
             "mesh_vertices": mesh_vertices,
             "mesh_triangles": mesh_triangles,

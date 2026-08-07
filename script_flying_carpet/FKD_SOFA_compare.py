@@ -24,6 +24,8 @@ cl_2 = (np.array([372, 550, 388, 570, 363, 518, 379, 525])*1e-3).tolist()
 cl_3 = (np.array([575, 470, 580, 445, 510, 348, 498, 309])*1e-3).tolist()
 cl_list = [cl_1, cl_2, cl_3]
 
+
+
 def _as_point_array(points, name: str) -> np.ndarray:
     if isinstance(points, o3d.geometry.PointCloud):
         points = np.asarray(points.points)
@@ -400,7 +402,7 @@ def measure_diff_surface(
     error_tol_idx = np.where(errors < tol)[0]
     errors_tol = errors[error_tol_idx]
     error_sorted = np.sort(errors)
-    percentile_95 = error_sorted[int(0.9 * len(error_sorted))]
+    percentile_95 = error_sorted[:int(0.9 * len(error_sorted))]
 
     return errors, percentile_95, errors_tol
 
@@ -543,7 +545,7 @@ if __name__ == "__main__":
     # print("initial cable length: ", flying_carpet.get_cable_length_bary(flying_carpet.vertices))
     # get_FKD_flat(flying_carpet, cl_list)
     # get_FKD_3(flying_carpet)
-    draw_3d(flying_carpet)
-    # compare_SOFA_FKD(flying_carpet)
+    # draw_3d(flying_carpet)
+    compare_SOFA_FKD(flying_carpet)
 
     

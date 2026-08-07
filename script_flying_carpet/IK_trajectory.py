@@ -12,7 +12,7 @@ import csv
 currentdir = os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentframe())))
 parentdir = os.path.dirname(currentdir)
 sys.path.insert(0, parentdir) 
-from flying_carpet import Flying_carpet
+from flying_carpet_torch import Flying_carpet_torch
 import pickle
 from matplotlib import pyplot as plt
 
@@ -77,7 +77,7 @@ def add_translation(ee_pos, translation_vector):
         ee_pos_translated[i] += translation_vector
     return ee_pos_translated
 
-def traj_paper_IKD(flying_carpet: Flying_carpet):
+def traj_paper_IKD(flying_carpet: Flying_carpet_torch):
     filename = "./data_flying_carpet/60mm_centered.pkl"
     with open(filename, 'rb') as f:
         ee_pos_centered = pickle.load(f)
@@ -104,7 +104,7 @@ def traj_paper_IKD(flying_carpet: Flying_carpet):
     # visualize_interpolated_ee(tar_ee_interpolated)  
     return tar_ee_list
 
-def tarj_paper_IKD_2(flying_carpet: Flying_carpet):
+def tarj_paper_IKD_2(flying_carpet: Flying_carpet_torch):
     filename = "./data_flying_carpet/60mm_centered.pkl"
     with open(filename, 'rb') as f:
         ee_60 = pickle.load(f)
@@ -119,7 +119,7 @@ def tarj_paper_IKD_2(flying_carpet: Flying_carpet):
     tar_ee_list.append(add_translation(ee_40, np.array([0.28, 0.6, 0.3])))
     return tar_ee_list
 
-def visualize_IKD_paper_1(flying_carpet: Flying_carpet, tar_ee_interpolated, vert_interpolated):
+def visualize_IKD_paper_1(flying_carpet: Flying_carpet_torch, tar_ee_interpolated, vert_interpolated):
     n_interpolated = len(tar_ee_interpolated)
     plotter = pv.Plotter()
     for i in range(n_interpolated):
@@ -157,7 +157,7 @@ def visualize_IKD_paper_1(flying_carpet: Flying_carpet, tar_ee_interpolated, ver
             
             
 
-def IKD_illustration_paper(flying_carpet: Flying_carpet, IK_traj_filename):
+def IKD_illustration_paper(flying_carpet: Flying_carpet_torch, IK_traj_filename):
     with open(IK_traj_filename, 'rb') as f:
         traj_result = pickle.load(f)
     ee_target_list = traj_result['traj_ee_interpolated']
@@ -190,7 +190,7 @@ def IKD_illustration_paper(flying_carpet: Flying_carpet, IK_traj_filename):
         
     
     
-def temp_script(flying_carpet: Flying_carpet, IK_traj_filename):
+def temp_script(flying_carpet: Flying_carpet_torch, IK_traj_filename):
     with open(IK_traj_filename, 'rb') as f:
         traj_result = pickle.load(f)
     ee_target_list = traj_result['traj_ee_interpolated']
@@ -217,7 +217,7 @@ def temp_script(flying_carpet: Flying_carpet, IK_traj_filename):
         pickle.dump(save_data, f)
 
 
-def IK_trajectory(flying_carpet: Flying_carpet, tar_ee_interpolated):
+def IK_trajectory(flying_carpet: Flying_carpet_torch, tar_ee_interpolated):
     starting_vert = flying_carpet.vertices - np.mean(flying_carpet.vertices, axis=0)
     starting_vert = starting_vert + np.array([0.28, 0.2, 0.3])
     # flying_carpet.visualize_vert(starting_vert)
@@ -251,14 +251,14 @@ def IK_trajectory(flying_carpet: Flying_carpet, tar_ee_interpolated):
         print(f"Step {i}: Error = {diff:.6f}, Final cable length = {final_length}")
     return Q_list_all, diff_list, vert_list
 
-def get_error(flying_carpet: Flying_carpet, ee_target_pos, vert):
+def get_error(flying_carpet: Flying_carpet_torch, ee_target_pos, vert):
     ee_pos = flying_carpet.get_ee_poses(vert)
     diff = 0
     for i in range(ee_pos.shape[0]):
         diff += 1/2*np.linalg.norm(ee_pos[i] - ee_target_pos[i])**2
     return diff
 
-def IK_trajectory_time_comparison(flying_carpet: Flying_carpet, tar_ee_interpolated):
+def IK_trajectory_time_comparison(flying_carpet: Flying_carpet_torch, tar_ee_interpolated):
     starting_vert = flying_carpet.vertices - np.mean(flying_carpet.vertices, axis=0)
     starting_vert = starting_vert + np.array([0.28, 0.2, 0.3])
     Q_list_all = [flying_carpet.vertices_to_q(starting_vert)]
@@ -284,23 +284,25 @@ def IK_trajectory_time_comparison(flying_carpet: Flying_carpet, tar_ee_interpola
             starting_vert = flying_carpet.get_fixedEE_guess_vertices(ee_target_pos)
             # starting_vert = vert_list[-1]
             start_time = time.time()
-            final_length, final_vert, Q_list = flying_carpet.IKD_single(ee_target_pos, starting_vert, max_iter=50, tol=1e-4, show_info = True, initial_guess = False)
+            final_length, final_vert, Q_list = flying_carpet.IKD_single(ee_target_pos, starting_vert, max_iter=50, tol=1e-4, show_info = False, initial_guess = False)
             time_list_CG.append(time.time() - start_time)
             error_list_CG.append(get_error(flying_carpet, ee_target_pos, final_vert))
             vert_list.append(final_vert)
             Q_list_all.append(Q_list)
+            print(f"Step {i}: CG Time taken: {time_list_CG[-1]:.4f} seconds, CG Error = {error_list_CG[-1]:.6f})")
+            
             # starting_vert = vert_list_FD[-1]
-            # start_FD_time = time.time()
-            # final_length, final_vert, Q_list = flying_carpet.IKD_single_minimize(ee_target_pos, starting_vert, max_iter=50, tol=1e-4, show_info = True, initial_guess = False)
-            # vert_list_FD.append(final_vert)
-            # Q_list_all_FD.append(Q_list)
-            # time_list_FD.append(time.time() - start_FD_time)
-            # error_list_FD.append(get_error(flying_carpet, ee_target_pos, final_vert))
-            print(f"Step {i}: CG Time taken: {time_list_CG[-1]:.4f} seconds, CG Error = {error_list_CG[-1]:.6f}")
+            start_FD_time = time.time()
+            final_length, final_vert, Q_list = flying_carpet.IKD_single_minimize(ee_target_pos, starting_vert, max_iter=50, tol=1e-4, show_info = False, initial_guess = False)
+            vert_list_FD.append(final_vert)
+            Q_list_all_FD.append(Q_list)
+            time_list_FD.append(time.time() - start_FD_time)
+            error_list_FD.append(get_error(flying_carpet, ee_target_pos, final_vert))
+            print(f"Step {i}: FD Time taken: {time_list_FD[-1]:.4f} seconds, FD Error = {error_list_FD[-1]:.6f}")
         else: 
             # starting_vert = flying_carpet.get_fixedEE_guess_vertices(ee_4)
-            # starting_vert = vert_list[-1]
-            starting_vert = flying_carpet.vertices.copy()
+            starting_vert = vert_list[-1]
+            # starting_vert = flying_carpet.vertices.copy()
             start_time = time.time()
             final_length, final_vert, Q_list = flying_carpet.IKD_single(ee_target_pos, starting_vert, max_iter=30, tol=1e-4, show_info = True, initial_guess=False)
             time_list_CG.append(time.time() - start_time)
@@ -309,21 +311,21 @@ def IK_trajectory_time_comparison(flying_carpet: Flying_carpet, tar_ee_interpola
             Q_list_all.append(Q_list)   
 
             # starting_vert = vert_list_FD[-1]
-            # start_FD_time = time.time()
-            # final_length, final_vert, Q_list = flying_carpet.IKD_single_minimize(ee_target_pos, starting_vert, max_iter=30, tol=1e-4, show_info = True, initial_guess=False)
-            # time_list_FD.append(time.time() - start_FD_time)
-            # vert_list_FD.append(final_vert)
-            # Q_list_all_FD.append(Q_list)
-            # error_list_FD.append(get_error(flying_carpet, ee_target_pos, final_vert))
-            print(f"Step {i}: CG Time taken: {time_list_CG[-1]:.4f} seconds, CG Error = {error_list_CG[-1]:.6f}")
+            start_FD_time = time.time()
+            final_length, final_vert, Q_list = flying_carpet.IKD_single_minimize(ee_target_pos, starting_vert, max_iter=30, tol=1e-4, show_info = False, initial_guess=False)
+            time_list_FD.append(time.time() - start_FD_time)
+            vert_list_FD.append(final_vert)
+            Q_list_all_FD.append(Q_list)
+            error_list_FD.append(get_error(flying_carpet, ee_target_pos, final_vert))
+            print(f"Step {i}: CG Time taken: {time_list_CG[-1]:.4f} seconds, CG Error = {error_list_CG[-1]:.6f}, FD Time taken: {time_list_FD[-1]:.4f} seconds, FD Error = {error_list_FD[-1]:.6f}")
 
         # print(f"Step {i}: Error = {diff:.6f}, Final cable length = {final_length}, Time taken: {time_list_CG[-1]:.4f} seconds, CG Error = {error_list_CG[-1]:.6f}")
-    return Q_list_all, vert_list, time_list_CG, error_list_CG
+    return Q_list_all, vert_list, time_list_CG, error_list_CG, time_list_FD, error_list_FD, Q_list_all_FD, vert_list_FD
 
 
 if __name__ == "__main__":
     description_file = "./models/flying_carpet/flying_carpet_description_bary.pkl"
-    flying_carpet = Flying_carpet(description_file)
+    flying_carpet = Flying_carpet_torch(description_file)
     # IKD_illustration_paper(flying_carpet, "./data_flying_carpet/IK_trajectory_results.pkl")
     # # temp_script(flying_carpet, "./data_flying_carpet/IK_trajectory_results.pkl")
     # exit(0)
@@ -333,17 +335,21 @@ if __name__ == "__main__":
     # print("length of traj_ee_interpolated: ", len(traj_ee_interpolated))
     # exit(0)
 
-    Q_list_all, vert_list, time_list_CG, error_list_CG = IK_trajectory_time_comparison(flying_carpet, traj_ee_interpolated)
+    Q_list_all, vert_list, time_list_CG, error_list_CG, time_list_FD, error_list_FD, Q_list_all_FD, vert_list_FD = IK_trajectory_time_comparison(flying_carpet, traj_ee_interpolated)
     # print("Error list: ", diff_list)
     dict2save = {
         "traj_ee_interpolated": traj_ee_interpolated,
         "Q_list_all": Q_list_all,
         "vert_list": vert_list,
         "time_list_CG": time_list_CG,
-        "error_list_CG": error_list_CG
+        "error_list_CG": error_list_CG,
+        "time_list_FD": time_list_FD,
+        "error_list_FD": error_list_FD,
+        "Q_list_all_FD": Q_list_all_FD,
+        "vert_list_FD": vert_list_FD
     }
 
-    with open("./data_flying_carpet/IK_trajectory_results_timed.pkl", 'wb') as f:
+    with open("./data_flying_carpet/IK_trajectory_results_timed_new.pkl", 'wb') as f:
         pickle.dump(dict2save, f)
     
 

@@ -382,8 +382,8 @@ class C_SRS_fixedEnd:
         ghost_block = 12 * self.nCable
         matA_size = mem_block + bend_block + cable_block + ghost_block
         max_weight = np.max((np.max(self.mem_weight_list), np.max(self.bending_weight_list)))
-        self.weight_cable = 50 * max_weight
-        self.weight_ghost = 50 * max_weight
+        self.weight_cable = 10 * max_weight
+        self.weight_ghost = 10 * max_weight
         self.nNeighbour_list = []
         for i in range(self.num_vertices):
             self.nNeighbour_list.append(len(self.neighbour_list[i]))
@@ -640,8 +640,28 @@ class C_SRS_fixedEnd:
                            / (cur_cl[i] - cl_minus_final[i]))
         return J
 
+    def get_Jacobian_IK_FD(self, target_ee_pos, Q, delta=1e-3):
+        j_ee = self.get_FD_Jacobian_EE(Q, delta)
+        J_IK = np.zeros((self.nCable,))
+        cur_ee_pos = self.get_ee_pos(Q)
+        for i in range(self.nCable):
+            for j in range(3):
+                J_IK[i] += j_ee[j, i] * (target_ee_pos[j] - cur_ee_pos[j])
+        return J_IK
 
-    def deform_CG(self, tar_cable_length, starting_vertices, max_iter = 300, tol = 1e-8):
+
+
+    def get_Jacobian_IK_CG(self, target_ee_pos, Q):
+        j_ee = self.get_CG_Jacobian_EE(Q)
+        J_IK = np.zeros((self.nCable,))
+        cur_ee_pos = self.get_ee_pos(Q)
+        for i in range(self.nCable):
+            for j in range(3):
+                J_IK[i] += j_ee[j, i] * (target_ee_pos[j] - cur_ee_pos[j])
+        return J_IK
+
+
+    def deform_CG(self, tar_cable_length, starting_vertices, max_iter = 300, tol = 1e-8, show_info = False):
         cur_vertices = starting_vertices.copy()
         cur_q = self.vertices_to_q(starting_vertices)
         q_last = cur_q.copy()
@@ -657,7 +677,8 @@ class C_SRS_fixedEnd:
             cur_vertices = self.q_to_vertices(cur_q)
             diff = np.linalg.norm(cur_q - q_last)/(3*self.num_vertices)
             q_last = cur_q.copy()
-            print("cg iteration {}: diff = {}".format(i, diff))
+            if show_info:
+                print("cg iteration {}: diff = {}".format(i, diff))
             if diff < tol:
                 break
         return cur_vertices
@@ -738,6 +759,8 @@ class C_SRS_fixedEnd:
         diff_count = 0
         cable_tension = np.zeros(self.nCable)
         t_start = time.time()
+        diff_list = []
+        time_list = []
         while t_a < total_time:
             dt = min(h, total_time - t_a)
             Q_a_last = Q_a.copy()
@@ -795,13 +818,15 @@ class C_SRS_fixedEnd:
             Q_a = Q_a + dt * Q_ad
             t_a += dt
             Q_list.append(Q_a.copy())
-            diff = np.linalg.norm(Q_a - Q_a_last) / np.sqrt(3*self.num_vertices)
+            diff = np.linalg.norm(Q_a - Q_a_last) / np.sqrt(self.num_vertices)
             current_lengths = np.asarray(self.get_cable_length_bary(Q_a))
             constraint_error = float(
                 np.max(np.maximum(current_lengths - target_cable_length, 0.0))
             )
             # if diff < 1e-5:
             #     h *= 0.1
+            diff_list.append(diff)  
+            time_list.append(t_a)
             if diff < tol and constraint_error < tol:
                 diff_count += 1
                 if diff_count >= 10:
@@ -821,7 +846,7 @@ class C_SRS_fixedEnd:
         t_end = time.time()
         print(f"Total simulation time: {t_end - t_start:.2f}s")
         vert_length = self.q_to_vertices(Q_a)
-        return Q_list, vert_length, cable_tension
+        return Q_list, vert_length, cable_tension, diff_list, time_list
             
     def FKD_free_static(self, show_info = False):
         """Solve the gravity-only corotational equilibrium on moving vertices."""
@@ -1325,10 +1350,9 @@ class C_SRS_fixedEnd:
                 Jac[i, j] = (ee_pos_plus[j] - ee_pos_minus[j]) / (2*eps)
         return Jac.T
 
-    def IKD_single(self, target_ee_pos, starting_vertices, AA = False, tol = 1e-3, show_info = False):
+    def IKD_single(self, target_ee_pos, starting_vertices, AA = False, tol = 1e-3, max_iter = 100, show_info = False):
         idx_ee = self.ee_idx[0]
         idx_ee_moving = self.idxAll_2_idxMoving[idx_ee]
-        max_iter = 50
         AA_memory = 5
         aa_cl_list = np.zeros((AA_memory, self.nCable))
         aa_diff_list = np.zeros((AA_memory, ))
@@ -1407,7 +1431,7 @@ class C_SRS_fixedEnd:
                 
             return jac_toreturn
 
-        tol_fd = 3e-3
+        tol_fd = tol * 10
         cur_length = self.get_cable_length_bary(Q)
         Q_list, cable_tension = self.FKD_static_length(starting_vertices,cur_length)
         starting_vertices = self.q_to_vertices(Q_list[-1])
@@ -1422,10 +1446,11 @@ class C_SRS_fixedEnd:
                 jac = get_jacobian(Q)
             else:
                 jac = get_jacobian_fd(Q)
+            
             # jac = get_jacobian_fd(Q)
             # jac = get_jacobian(Q)
             # jac = flatten_jac(jac)
-            jac[1] *= 0.1
+            # jac[1] *= 0.1
             diff_foreach = diff/self.nCable
             cur_length = self.get_cable_length_bary(Q)
             cmd_diff = [0 for _ in range(self.nCable)]
@@ -1436,7 +1461,7 @@ class C_SRS_fixedEnd:
                 if cable_tension[k] < 1e-5 and jac[k] < 0:
                     cmd_diff[k] = 0
                 else:
-                    # cmd_diff[k] = diff_foreach / jac[k]
+                    # cmd_diff[k] = -diff_foreach / jac[k]
                     cmd_diff[k] = -dl * jac[k]
             cmd_diff = clamp_diff(cmd_diff, min_bound = 1e-4, max_bound = 5e-3)
             for k in range(self.nCable):
@@ -2262,6 +2287,7 @@ class C_SRS_fixedEnd:
     def visualize_planned_traj(self, vertices, traj):
         mesh = pv.PolyData(vertices, np.hstack((np.full((self.mesh_triangles.shape[0], 1), 3), self.mesh_triangles)))
         ws_pts = np.array(self.ee_pos_list)
+        
         plotter = pv.Plotter()
         plotter.add_mesh(mesh, color='lightgray', show_edges=True)
         pp_locations = self.get_pp_location_bary(vertices)
@@ -2289,8 +2315,41 @@ class C_SRS_fixedEnd:
         # add grid
         plotter.show_grid()
         plotter.show_axes()
-        plotter.add_legend()
+        # plotter.add_legend()
         plotter.show()
+
+    def visualize_single_target(self, vertices, target_ee_pos):
+        mesh = pv.PolyData(vertices, np.hstack((np.full((self.mesh_triangles.shape[0], 1), 3), self.mesh_triangles)))
+        ws_pts = np.array(self.ee_pos_list)
+        
+        plotter = pv.Plotter()
+        plotter.add_mesh(mesh, color='lightgray', show_edges=True)
+        pp_locations = self.get_pp_location_bary(vertices)
+        plotter.add_points(pp_locations, color='blue', point_size=10
+                            , label='Pullpoints')
+        plotter.add_points(self.pulley_location, color='blue', point_size=10
+                            , label='Pulleys')
+        # add lines between pullpoints and pulleys
+        for i in range(self.nCable):
+            plotter.add_lines(np.array([pp_locations[i], self.pulley_location[i]]), color='blue', width=2)
+        # annotate ee vertices
+        plotter.add_points(vertices[self.ee_idx], color='red', point_size=10, label='End Effectors')
+        # add all points in ws_pts as cyan points
+        plotter.add_points(ws_pts, color='cyan', point_size=5, label='WS Points', opacity=0.5)
+
+        # make fixed idx black
+        plotter.add_points(vertices[self.fixed_idx], color='black', point_size=10, label='Fixed Vertices')
+
+
+        # add target ee pos as a green point
+        plotter.add_points(target_ee_pos.reshape((1,3)), color='green', point_size=10, label='Target EE Position')
+        # add grid
+        plotter.show_grid()
+        plotter.show_axes()
+        # plotter.add_legend()
+        # plotter.show()
+        return plotter
+
 
     def load_ws(self, filePath="./data/training_data_all.pkl"):
         with open(filePath, 'rb') as f:
@@ -2299,6 +2358,16 @@ class C_SRS_fixedEnd:
         self.ee_pos_list = data['ee_pos']
         self.vertices_list = data['vertices']
         self.cable_tension_list = data['cable_tension']
+        with open("data/ws_strain_check.pkl", 'rb') as f:
+            data = pickle.load(f)
+            ave_strain_list = data["ave_strain_list"]
+            good_idx = data["good_idx"]
+        # modify the cable lengths and ee_pos_list to only include the good_idx
+        self.cl_list = [self.cl_list[i] for i in good_idx]
+        self.ee_pos_list = [self.ee_pos_list[i] for i in good_idx]
+        self.vertices_list = [self.vertices_list[i] for i in good_idx]
+        self.cable_tension_list = [self.cable_tension_list[i] for i in good_idx]
+
 
     def replay_Q_list(self, Q_list, filePath="./c_srs_simulation.mp4", framerate=10,
                        window_size=(1024, 768)):
@@ -2523,11 +2592,17 @@ if __name__ == "__main__":
     description_file = "./models/flat_tri_surface/C_SRS_description_bary.pkl"
     c_srs = C_SRS_fixedEnd(description_file)
     icl = c_srs.initial_cable_length.copy()
-    tcl = [icl[0]-0.03, icl[1]-0.03, icl[2]-0.03, icl[3], icl[4], icl[5]]
+    # tcl = [icl[0]-0.03, icl[1]-0.03, icl[2]-0.03, icl[3], icl[4], icl[5]]
+    tcl = np.array([416,430,436,302,270,286])*1e-3
     start_time = time.time()
-    Q_list, cable_tension = c_srs.FKD_static_length(c_srs.vertices, tcl, tol = 1e-6, show_info = False)
-    print("FKD time: ", time.time() - start_time)
-    c_srs.visualize_vert(c_srs.q_to_vertices(Q_list[-1]))
+    # print("scaled kb: ", kb* 1e4)
+    c_srs.reassemble_CG_matrices(100, 10)
+    vert_cg = c_srs.deform_CG(tcl, c_srs.vertices, max_iter=500, tol=1e-9, show_info = False)
+    cg_length = c_srs.get_cable_length_bary(vert_cg)
+    print("diff with target cable length: ", np.array(cg_length) - np.array(tcl))
+    # Q_list, cable_tension = c_srs.FKD_static_length(c_srs.vertices, tcl, tol = 1e-6, show_info = False)
+    print("CG time", time.time() - start_time)
+    c_srs.visualize_vert(vert_cg)
     exit(0)
     # tcl = [icl[0]+0.1, icl[1]+0.1, icl[2]-0.04, icl[3]+0.1, icl[4]-0.01, icl[5]+0.1]
     # Q_list = c_srs.FKD_static(c_srs.vertices, [1,1,1,1,1,1],tol = 1e-6, show_info = True)

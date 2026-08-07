@@ -193,10 +193,38 @@ def view_trajectory(flying_carpet: Flying_carpet, traj_file = "data_flying_carpe
         flying_carpet.visualize_vert(starting_vertices)
 
 
+def cal_trajectory_properties(flying_carpet: Flying_carpet, traj_file = "data_flying_carpet/pick_place_data.pkl"):
+    with open(traj_file, 'rb') as f:
+        data_loaded = pickle.load(f)
+        print("Loaded data keys:", data_loaded.keys())
+        ee_target_list = data_loaded['ee_target_list']
+        vert_list = data_loaded['vert_list']
+        cl_list = data_loaded['cl_list']
+    # exit(0)
+    total_length_EE = [0 for _ in range(8)]
+    for i in range(len(vert_list)-1):
+        vert_start = vert_list[i]
+        vert_end = vert_list[i+1]
+        ee_start = flying_carpet.get_ee_poses(vert_start)
+        ee_end = flying_carpet.get_ee_poses(vert_end)
+        for j in range(8):
+            total_length_EE[j] += np.linalg.norm(ee_end[j] - ee_start[j])
+
+    time_list = [6,10,20]
+    speed_list = []
+    for t in time_list:
+        speed_list.append([total_length_EE[j]/t for j in range(8)])
+
+    ave_speed = [np.mean(speed) for speed in speed_list]
+    print("average speed of end-effector for different time durations:")
+    print("time duration: ", time_list)
+    print("average speed: ", ave_speed)
+
 
 
 if __name__ == "__main__":
     description_file = "./models/flying_carpet/flying_carpet_description_bary.pkl"
     flying_carpet = Flying_carpet(description_file)
-    plan_pick_place(flying_carpet)
+    cal_trajectory_properties(flying_carpet)
+    # plan_pick_place(flying_carpet)
     # view_trajectory(flying_carpet)

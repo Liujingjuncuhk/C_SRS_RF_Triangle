@@ -13,6 +13,7 @@ currentdir = os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentfram
 parentdir = os.path.dirname(currentdir)
 sys.path.insert(0, parentdir) 
 from flying_carpet import Flying_carpet
+from flying_carpet_torch import Flying_carpet_torch
 import pickle
 
 
@@ -22,14 +23,15 @@ if __name__ == "__main__":
     filename = "./data_flying_carpet/60mm_centered.pkl"
     with open(filename, 'rb') as f:
         ee_pos_centered = pickle.load(f)
-    offset =  np.array([0.28, 0.2, 0.2])
+    offset =  np.array([0.28, 0.5, 0.2])
+    flying_carpet.reassemble_CG_matrices(1e3)
     # offset = np.array([0.27938779, 0.37983389, 0.27474488])
     # offset = np.array([0.27898019, 0.37982945, 0.26301642])
     ee_target_pos = ee_pos_centered + offset
     # guess_vert = flying_carpet.get_fixedEE_guess_vertices(ee_target_pos)
-    final_length, final_vert, Q_list = flying_carpet.IKD_single(ee_target_pos, flying_carpet.vertices, max_iter=50, tol=5e-5, show_info = True, initial_guess = True)
+    final_length, final_vert, Q_list = flying_carpet.IKD_single(ee_target_pos, flying_carpet.vertices, max_iter=150, tol=5e-5, show_info = True, initial_guess = False)
 
-    
+
     print("final_length=", final_length)
     flying_carpet.visualize_IKD_result(ee_target_pos, final_vert)
     # flying_carpet.replay_IKD_Q_list(ee_target_pos, Q_list)

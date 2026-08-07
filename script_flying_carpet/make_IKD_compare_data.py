@@ -76,17 +76,42 @@ def plot_2_error(error_list_CG, error_list_FD, save_path=None):
     error_list_FD = np.array(error_list_FD)
     # x from 1 to len(error_list_CG)
     x = np.arange(1, len(error_list_CG) + 1)
-    plt.figure()
-    plt.plot(x, error_list_CG, 'o-', label='Error between EE and Vert Trajectories (CG)')
-    plt.plot(x, error_list_FD, 'o-', label='Error between EE and Vert Trajectories (FD)')
-    plt.xlabel("Time step")
-    # plt.ylabel("Error (m)")
-    plt.title("Error between EE and Vert Trajectories")
     max_val = np.max([np.max(error_list_CG), np.max(error_list_FD)])
-    plt.ylim(0, max_val * 1.5)  # Set y-axis limit slightly above the max value
-    plt.grid(True)
+    split = 0.001
+
+    # Give the densely populated 0--0.001 range more vertical space while
+    # retaining the larger errors in a compact upper panel.
+    fig, (ax_upper, ax_lower) = plt.subplots(
+        2, 1, sharex=True, gridspec_kw={'height_ratios': [1, 2], 'hspace': 0.05}
+    )
+    for axis in (ax_upper, ax_lower):
+        axis.plot(x, error_list_CG, 'o-', label='Error between EE and Vert Trajectories (CG)')
+        axis.plot(x, error_list_FD, 'o-', label='Error between EE and Vert Trajectories (FD)')
+        axis.grid(True)
+
+    ax_upper.set_ylim(split, max_val * 1.2)
+    ax_lower.set_ylim(0, split)
+    ax_upper.set_title("Error between EE and Vert Trajectories")
+    ax_lower.set_xlabel("Time step")
+    ax_upper.legend()
+
+    # Hide adjoining spines and draw diagonal marks to indicate the axis break.
+    ax_upper.spines['bottom'].set_visible(False)
+    ax_lower.spines['top'].set_visible(False)
+    ax_upper.tick_params(axis='x', which='both', bottom=False, labelbottom=False)
+    break_size = 0.008
+    break_style = dict(color='k', clip_on=False)
+    ax_upper.plot((-break_size, +break_size), (-break_size, +break_size),
+                  transform=ax_upper.transAxes, **break_style)
+    ax_upper.plot((1 - break_size, 1 + break_size), (-break_size, +break_size),
+                  transform=ax_upper.transAxes, **break_style)
+    ax_lower.plot((-break_size, +break_size), (1 - break_size, 1 + break_size),
+                  transform=ax_lower.transAxes, **break_style)
+    ax_lower.plot((1 - break_size, 1 + break_size), (1 - break_size, 1 + break_size),
+                  transform=ax_lower.transAxes, **break_style)
+
     if save_path:
-        plt.savefig(save_path)
+        fig.savefig(save_path, bbox_inches='tight')
     else:
         plt.show()
 
@@ -119,7 +144,16 @@ def plot_time_diff(time_diff_list, save_path=None):
     else:
         plt.show()
 
+def plot_2_error_all():
+    with open("./data_flying_carpet/IK_trajectory_results_timed_new.pkl", 'rb') as f:
+        data = pickle.load(f)
+    error_list_CG = data['error_list_CG']
+    error_list_FD = data['error_list_FD']
+    plot_2_error(error_list_CG, error_list_FD)
+
 if __name__ == "__main__":
+    plot_2_error_all()
+    exit(0)
     description_file = "./models/flying_carpet/flying_carpet_description_bary.pkl"
     flying_carpet = Flying_carpet(description_file)
 

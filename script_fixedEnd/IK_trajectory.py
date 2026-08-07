@@ -13,6 +13,7 @@ currentdir = os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentfram
 parentdir = os.path.dirname(currentdir)
 sys.path.insert(0, parentdir) 
 from C_SRS_fixedEnd import C_SRS_fixedEnd, IK_MLP
+from C_SRS_fixedEnd_torch import C_SRS_fixedEnd_torch
 import pickle
 
 def dense_ee_target(ee_target_list, nSamples):
@@ -76,6 +77,14 @@ def get_total_dis(ee_target_list):
 if __name__ == "__main__":
     description_file = "./models/flat_tri_surface/C_SRS_description_bary.pkl"
     c_srs = C_SRS_fixedEnd(description_file)
+    ee_target = np.array([0.26, 0.08, 0.03])
+    # c_srs.reassemble_CG_matrices(0.1,10)
+    
+    # cur_length, starting_vertices, Q_list_final = c_srs.IKD_single(ee_target, c_srs.vertices, show_info=1)
+    # c_srs.visualize_IKD_result( starting_vertices, ee_target)
+    # exit(0)
+
+
     # ee_target_list = np.array([[0.26, 0.08, 0.03],
     #                            [0.25, 0.08, 0.07],
     #                            [0.22, 0.08, 0.08],
@@ -88,10 +97,10 @@ if __name__ == "__main__":
                            [0.24, 0.08, 0.04],
                            [0.26, 0.08, 0.03]]) # parallelogram (faked)
 
-    # ee_target_list = np.array([[0.26, 0.08, 0.03],
-    #                            [0.24, 0.06, 0.07],
-    #                            [0.24, 0.1, 0.07],
-    #                            [0.26, 0.08, 0.03]]) # triangle
+    ee_target_list = np.array([[0.26, 0.08, 0.03],
+                               [0.24, 0.06, 0.07],
+                               [0.24, 0.1, 0.07],
+                               [0.26, 0.08, 0.03]]) # triangle
 
     # ee_target_list = np.array([[0.26, 0.08, 0.03],
     #                                [0.24, 0.06, 0.07],
@@ -105,8 +114,8 @@ if __name__ == "__main__":
     # exit(0)
     dense_targets = dense_ee_target(ee_target_list, nSamples=20)
     # ee_target_list = np.array([[0.25, 0.08, 0.02]])
-    # c_srs.visualize_planned_traj(c_srs.vertices, ee_target_list)
-    # exit(0)
+    c_srs.visualize_planned_traj(c_srs.vertices, ee_target_list)
+    exit(0)
     length_cmd_list = []
     vert_list = []
     starting_vert = c_srs.vertices

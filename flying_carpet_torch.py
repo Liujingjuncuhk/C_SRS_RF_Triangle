@@ -10,6 +10,7 @@ import numpy as np
 import torch
 import pyvista as pv
 from scipy.linalg import lu_factor, lu_solve
+from scipy.optimize import minimize
 from utilities import projected_gauss_seidel_lcp
 
 from flying_carpet import Flying_carpet
@@ -471,6 +472,190 @@ class Flying_carpet_torch(Flying_carpet):
             if diff<tol and error<tol and relative<tol: break
         return history,q.reshape(-1,3),tension
 
+    def IKD_single(self, target_ee_pos, starting_vertices, tol=1e-3,
+                   max_iter=500, show_info=False, initial_guess=True):
+        """Inverse kinematics using the reference Shape-Up sensitivity update.
+
+        The Shape-Up cable Jacobian supplies the descent direction, while each
+        cable-length command is equilibrated by the hybrid static FEM solver.
+        Slack cables are prevented from being lengthened in a direction that
+        would require them to push.
+        """
+        target=np.asarray(self._numpy(target_ee_pos),dtype=float)
+        expected=(len(self.ee_idx),3)
+        if target.shape==(3,) and len(self.ee_idx)==1:
+            target=target.reshape(1,3)
+        if target.shape!=expected or np.any(~np.isfinite(target)):
+            raise ValueError(f"target_ee_pos must have shape {expected} and be finite")
+        q=np.asarray(self._numpy(starting_vertices),dtype=float).reshape(-1).copy()
+        if q.size!=3*self.num_vertices:
+            raise ValueError("starting_vertices must be an (n,3) array or a 3n vector")
+        if not np.isfinite(tol) or tol<=0:
+            raise ValueError("tol must be a finite positive value")
+        if not isinstance(max_iter,(int,np.integer)) or max_iter<=0:
+            raise ValueError("max_iter must be a positive integer")
+
+        ee_dofs=(3*np.asarray(self.ee_idx)[:,None]+np.arange(3)).reshape(-1)
+
+        def errors(q_value):
+            ee=q_value.reshape(self.num_vertices,3)[np.asarray(self.ee_idx)]
+            residual=ee-target
+            objective=0.5*np.dot(residual.reshape(-1),residual.reshape(-1))
+            cartesian=np.linalg.norm(residual,axis=1).mean()
+            return objective,cartesian,residual
+
+        if initial_guess:
+            guess=np.asarray(self.get_fixedEE_guess_vertices(target),dtype=float)
+            _,guess_lengths=self._cable_geometry_cpu(guess)
+            _,guess,cable_tension=self.FKD_time(
+                guess_lengths, 5, guess,tol=1e-4,show_info=False
+            )
+            q=guess.reshape(-1)
+        else:
+            cable_tension=np.zeros(self.nCable)
+
+        final_Q_list=[q.copy()]
+        step=0.1
+        for iteration in range(max_iter):
+            objective,_,residual=errors(q)
+            # get_CG_Jacobian returns dq/dl for physical and ghost DOFs.
+            shape_jac=np.asarray(self.get_CG_Jacobian(q),dtype=float)
+            ee_jac=shape_jac[ee_dofs,:]
+            gradient=ee_jac.T@residual.reshape(-1)
+            _,current_length=self._cable_geometry_cpu(q)
+            command_delta=-step*gradient
+            if iteration>0:
+                slack=(cable_tension<1e-5)&(gradient<0)
+                command_delta[slack]=0.0
+            command_length=current_length+command_delta
+            # Cable lengths are physical positive quantities. A bad IK step
+            # should fail locally rather than entering the static active set.
+            command_length=np.maximum(command_length,1e-8)
+            _,vertices,cable_tension=self.FKD_time(
+                command_length, 5, q,tol=1e-4,show_info=False
+            )
+            q=vertices.reshape(-1)
+            final_Q_list.append(q.copy())
+            objective,cartesian,_=errors(q)
+            if show_info:
+                print(
+                    f"IK iteration {iteration+1}: objective={objective:.7e}, "
+                    f"mean EE error={cartesian:.7e}, step={step:.3g}, "
+                    f"gradient={np.round(gradient,5)}, "
+                    f"tension={np.round(cable_tension,5)}, "
+                    f"cable delta={np.round(command_delta,5)}"
+                )
+            if objective<tol:
+                if show_info:
+                    print(f"IK converged in {iteration+1} iterations")
+                break
+
+        _,final_length=self._cable_geometry_cpu(q)
+        return final_length,q.reshape(self.num_vertices,3),final_Q_list
+
+    def IKD_single_minimize(self, ee_target_pos, starting_vertices, max_iter=50,
+                            tol=1e-4, show_info=True, initial_guess=False):
+        """Minimize end-effector error over commanded cable lengths.
+
+        SLSQP estimates the gradient with three-point finite differences. Every
+        distinct objective evaluation runs ``FKD_time`` from the same settled
+        starting configuration, keeping the numerical objective deterministic.
+        """
+        target=np.asarray(self._numpy(ee_target_pos),dtype=float)
+        expected=(len(self.ee_idx),3)
+        if target.shape==(3,) and len(self.ee_idx)==1:
+            target=target.reshape(1,3)
+        if target.shape!=expected:
+            raise ValueError(f"ee_target_pos must have shape {expected}")
+        if np.any(~np.isfinite(target)):
+            raise ValueError("ee_target_pos must contain finite values")
+        if not np.isfinite(tol) or tol<=0:
+            raise ValueError("tol must be a finite positive value")
+        if not isinstance(max_iter,(int,np.integer)) or max_iter<=0:
+            raise ValueError("max_iter must be a positive integer")
+
+        vertices=np.asarray(self._numpy(starting_vertices),dtype=float)
+        if vertices.size!=3*self.num_vertices:
+            raise ValueError("starting_vertices must be an (n,3) array or a 3n vector")
+        vertices=vertices.reshape(self.num_vertices,3).copy()
+        if np.any(~np.isfinite(vertices)):
+            raise ValueError("starting_vertices must contain finite values")
+
+        if initial_guess:
+            vertices=np.asarray(self.get_fixedEE_guess_vertices(target),dtype=float)
+            _,guess_length=self._cable_geometry_cpu(vertices)
+            _,vertices,_=self.FKD_time(
+                guess_length,10.0,vertices,tol=5e-5,h=0.01,show_info=False
+            )
+
+        # This settled state remains fixed across evaluations. Updating it would
+        # make finite-difference samples depend on evaluation order.
+        evaluation_start=vertices.copy()
+        _,initial_length=self._cable_geometry_cpu(evaluation_start)
+        evaluation_count=0
+        cached_length=None
+        cached_vertices=None
+        cached_ee=None
+        final_Q_list=[evaluation_start.reshape(-1).copy()]
+
+        def forward_kinematics(cable_length):
+            nonlocal evaluation_count,cached_length,cached_vertices,cached_ee
+            cable_length=np.asarray(cable_length,dtype=float).reshape(-1)
+            if cached_length is not None and np.array_equal(cable_length,cached_length):
+                return cached_vertices,cached_ee
+            _,deformed,_=self.FKD_time(
+                cable_length,5.0,evaluation_start,tol=1e-4,h=0.01,
+                show_info=False
+            )
+            ee=np.asarray(deformed,dtype=float)[np.asarray(self.ee_idx)]
+            evaluation_count+=1
+            cached_length=cable_length.copy()
+            cached_vertices=np.asarray(deformed,dtype=float).copy()
+            cached_ee=ee.copy()
+            if show_info:
+                objective=0.5*np.sum((ee-target)**2)
+                # print(f"Minimize FK evaluation {evaluation_count}: "
+                #       f"objective={objective:.6e}",flush=True)
+            return cached_vertices,cached_ee
+
+        def objective_function(cable_length):
+            _,ee=forward_kinematics(cable_length)
+            residual=(ee-target).reshape(-1)
+            return 0.5*np.dot(residual,residual)
+
+        def save_iteration(cable_length):
+            deformed,_=forward_kinematics(cable_length)
+            final_Q_list.append(deformed.reshape(-1).copy())
+
+        result=minimize(
+            objective_function,
+            initial_length,
+            method="SLSQP",
+            bounds=[(np.finfo(float).eps,None)]*self.nCable,
+            jac="3-point",
+            callback=save_iteration,
+            tol=tol,
+            options={
+                "ftol":max(0.5*tol**2,np.finfo(float).eps),
+                "finite_diff_rel_step":1e-3,
+                "maxiter":max_iter,
+                "disp":show_info,
+            },
+        )
+
+        final_vertices,final_ee=forward_kinematics(result.x)
+        final_q=final_vertices.reshape(-1)
+        if not np.array_equal(final_Q_list[-1],final_q):
+            final_Q_list.append(final_q.copy())
+        _,final_length=self._cable_geometry_cpu(final_vertices)
+        final_error=np.linalg.norm(final_ee-target,axis=1).mean()
+        if show_info:
+            print(f"IK minimize evaluations: {evaluation_count}, "
+                  f"success={result.success}, final error={final_error:.7e}")
+            if not result.success:
+                print(f"Optimizer message: {result.message}")
+        return final_length,final_vertices,final_Q_list
+
     # Compatibility names used by early versions of this module.
     def get_jacobian_CG(self, Q):
         return self.get_CG_Jacobian(Q)
@@ -484,6 +669,19 @@ class Flying_carpet_torch(Flying_carpet):
             _, plus, _ = self.FKD_time(command, 0.1, q, tol=1e-5)
             command[i] -= 2*delta
             _, minus, _ = self.FKD_time(command, 0.1, q, tol=1e-5)
+            jac[:, i] = ((plus[self.ee_idx]-minus[self.ee_idx])/(2*delta)).reshape(-1)
+        return jac
+
+    def get_jacobian_CG_FD(self, Q, delta=1e-3):
+        """Finite-difference Jacobian of Shape-Up's CG solve."""
+        q = np.asarray(Q, dtype=float).reshape(-1)
+        lengths = np.asarray(self.get_cable_length_bary(q))
+        jac = np.empty((3*len(self.ee_idx), self.nCable))
+        for i in range(self.nCable):
+            command = lengths.copy(); command[i] += delta
+            plus = self.deform_CG(q, command, max_iter=10, tol=1e-5)
+            command[i] -= 2*delta
+            minus = self.deform_CG(q, command, max_iter=10, tol=1e-5)
             jac[:, i] = ((plus[self.ee_idx]-minus[self.ee_idx])/(2*delta)).reshape(-1)
         return jac
 
@@ -653,6 +851,7 @@ if __name__ == "__main__":
     tcl = [icl[0]-shortened_length, icl[1]-shortened_length, icl[2]-shortened_length, icl[3]-shortened_length, icl[4], icl[5], icl[6], icl[7]]
     print("Target cable length shortened for " , shortened_length,  ", tcl=", tcl)
     time_start = time.time()
-    Q_list, vert_length, cable_tension = flying_carpet.FKD_time(tcl,5, flying_carpet.vertices, tol=1e-4, show_info=False)
+    # Q_list, vert_length, cable_tension = flying_carpet.FKD_time(tcl,5, flying_carpet.vertices, tol=1e-4, show_info=False)
+    vert_length = flying_carpet.deform_CG(flying_carpet.vertices, tcl, max_iter=1000, tol=1e-8, show_info=False)
     print("FKD_time finished in ", time.time()-time_start, " seconds")
     flying_carpet.visualize_vert(vert_length)

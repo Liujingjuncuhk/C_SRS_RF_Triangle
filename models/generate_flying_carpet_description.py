@@ -664,8 +664,10 @@ def generate_L_list(mesh_vertices, mesh_triangles):
     return L_list
 
 def generate_C_SRS_description(mesh_vertices, mesh_triangles, pullpoint_locations, ee_locations, pulley_locations, density, thickness, Youngs_modulus, Poisson_ratio):
-    k_m = Youngs_modulus * thickness / (1 - Poisson_ratio**2)
-    k_b = Youngs_modulus * thickness**3 / (12 * (1 - Poisson_ratio**2))
+    # k_m = Youngs_modulus * thickness / (1 - Poisson_ratio**2)
+    # k_b = Youngs_modulus * thickness**3 / (12 * (1 - Poisson_ratio**2))
+    k_m = 1
+    k_b = 1
 
     # Represent each pull point as (triangle index, barycentric coords, normal offset)
     pp_bary_tri_idx = []
@@ -694,7 +696,7 @@ def generate_C_SRS_description(mesh_vertices, mesh_triangles, pullpoint_location
     neighbour_list, neighbour_edge_list = generate_neighbour_list(mesh_triangles, len(mesh_vertices), edge_list)
     area_list = cal_area_list(mesh_vertices, mesh_triangles)
     L_list = generate_L_list(mesh_vertices, mesh_triangles)
-    mem_weight_list = [k_m * area_list[i] / (L_list[i]**2) for i in range(len(mesh_triangles))]
+    mem_weight_list = [k_m * area_list[i] for i in range(len(mesh_triangles))]
 
     initial_SK_list = get_ARAP_initial_SK_list(mesh_vertices, mesh_triangles, edge_list, weight_list, neighbour_list, neighbour_edge_list)
     stiffness_matrices = []
