@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 from scipy.interpolate import CubicSpline
 
 filtered_region = [0.02, 0.3, 0, 0.16, -0.1, 0.2]
-# traj_file = 'data/IKD_traj_result_triangle_half_mirror_smoothed.pkl'
+# traj_file = 'data/IKD_traj_result_paral_new.pkl'
 traj_file = 'data/IKD_traj_result_triangle_half_mirror_smoothed.pkl'
 def get_t_list(target_list, total_time):
     cartesian_dist_list = []
@@ -177,12 +177,12 @@ if __name__ == "__main__":
     # print("length of length cmd list: ", len(length_cmd_list))
     # print("length of ", len(length_cmd_list[0]))
 
-    planned_total_time = 20
+    planned_total_time = 5
 
 
     # t_list range from 0 to total_time, with length same as nSample
     t_list = get_t_list(target_list, planned_total_time)
-    dense_times, dense_commands = smooth_cl_input(t_list, length_cmd_list, Hz = 30)
+    dense_times, dense_commands = smooth_cl_input(t_list, length_cmd_list, Hz = 15)
     # view_dense_trajectory(dense_times, dense_commands)
     fixedEnd_sys.move_to_length_timed(length_cmd_list[0], consumed_time=3)
     input("press to execute traj")
