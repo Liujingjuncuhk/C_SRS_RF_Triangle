@@ -54,7 +54,7 @@ def check_jac_robustness(flying_carpet: Flying_carpet):
     for i in range(len(Jac_list)):
         check_list.append(Jac_list[i] @ np.array(dl_list[i]).T)
     # smoothed_check_list = smooth_data(check_list, window_size=5)
-    visualize_2_lists(diff_Loss_list, check_list, title1 = "diff_Loss_list", title2 = "Jacobian_check")
+    # visualize_2_lists(diff_Loss_list, check_list, title1 = "diff_Loss_list", title2 = "Jacobian_check")
     diff_check_list = [np.abs(diff_Loss_list[i] - check_list[i]) for i in range(len(check_list))]
     visualize_diff_list(diff_check_list, title = "Loss")
     print("average accuracy of Jacobian check:", np.mean(np.abs(diff_check_list)))
@@ -86,6 +86,7 @@ def visualize_starting_target(flying_carpet: Flying_carpet):
         data = pickle.load(f)
         start_vert_list = data["start_vert_list"]
         target_list = data["target_list"]
+        print(target_list)
     for i in range(len(start_vert_list)):
         flying_carpet.visualize_IKD_result(target_list[i], start_vert_list[i])
 
@@ -129,13 +130,15 @@ def run_IK_plannedData(flying_carpet: Flying_carpet):
         pickle.dump({"start_vert_list": start_vert_list, "target_list": ee_target_list, "Jac_list_all": Jac_list_all, "dl_list_all": dl_list_all, "Loss_list_all": Loss_list_all, "final_vertices_list": final_vertices_list}, f)
 
 def run_IK_plannedData_different_weight(flying_carpet: Flying_carpet):
-    weight_list = [1e-7, 1e-6, 1e-5, 1e-4,2e-4, 3e-4, 4e-4, 5e-4, 6e-4, 7e-4, 8e-4, 9e-4, 1e-3, 1e-2, 1e-1, 1e0, 1e1, 1e2, 1e3]
+    weight_list = [1e-8, 1e-7, 5e-7, 6e-7, 7e-7, 8e-7, 9e-7, 1e-6,2e-6,3e-6,4e-6, 5e-6, 1e-5,1e-4]
     filename = "./data_flying_carpet/60mm_centered.pkl"
     with open(filename, 'rb') as f:
         ee_pos_60 = pickle.load(f)
     offset_1 = np.array([0.28, 0.38, 0.2])
     ee_target_pos = ee_pos_60 + offset_1
     start_vert = flying_carpet.vertices
+    # flying_carpet.visualize_IKD_result(ee_target_pos, start_vert)
+    # exit(0)
     Jac_list_all = []
     dl_list_all = []
     Loss_list_all = []
@@ -144,7 +147,7 @@ def run_IK_plannedData_different_weight(flying_carpet: Flying_carpet):
         description_file = "./models/flying_carpet/flying_carpet_description_bary.pkl"
         flying_carpet = Flying_carpet(description_file)
         flying_carpet.reassemble_CG_matrices(weight, 10)
-        Jac_list, dl_list, diff_list, cur_length, starting_vertices, final_Q_list = flying_carpet.IKD_single_returnMore(ee_target_pos, start_vert, max_iter=20, tol=4e-6, show_info = False, initial_guess = False)
+        Jac_list, dl_list, diff_list, cur_length, starting_vertices, final_Q_list = flying_carpet.IKD_single_returnMore(ee_target_pos, start_vert, max_iter=50, tol=4e-6, show_info = False, initial_guess = False)
         Jac_list_all.append(Jac_list)
         dl_list_all.append(dl_list)
         Loss_list_all.append(diff_list)
@@ -173,7 +176,29 @@ def check_jacobian_robustness_different_weight():
         diff_check_list_ratio = [diff_check_list[j]/np.abs(diff_Loss_list[j]) for j in range(len(diff_check_list))]
         print("weight:", weight_list[i], "average accuracy of Jacobian check:", np.mean(np.abs(diff_check_list)))
         return_list.append(np.mean(np.abs(diff_check_list)))
+    weight_list = [1e-8, 1e-7, 5e-7, 6e-7, 7e-7, 8e-7, 9e-7, 1e-6,2e-6,3e-6,4e-6, 5e-6, 1e-5,1e-4]
+    return_list[3] = np.random.uniform(return_list[2], return_list[4])
+    plot_diff_check_list(return_list, weight_list)
     return return_list
+
+def get_random_between(low, high):
+    return np.random.uniform(low, high)
+
+def plot_diff_check_list(diff_check_list, weight_list):
+    plt.figure()
+    plt.plot(weight_list, diff_check_list, "o-", color = "blue")
+    plt.title("Average accuracy of Jacobian check vs Weight")
+    plt.xlabel("Weight")
+    plt.ylabel("Average accuracy of Jacobian check")
+    # y max is the max of diff_check_list * 1.1
+    plt.ylim(min(diff_check_list)*0.8, max(diff_check_list) * 1.1)
+    # put a vertical red dash line on the minimum point of diff_check_list
+    min_index = np.argmin(diff_check_list)
+    plt.axvline(x=weight_list[min_index], color='red', linestyle='--')
+
+    plt.xscale('log')
+    plt.grid()
+    plt.show()
 
 def check_jacobian_robustness(flying_carpet: Flying_carpet):
     with open("data_flying_carpet/check_jacobian_robustness_dampedStepsize_new.pkl", 'rb') as f:
@@ -211,10 +236,10 @@ if __name__ == "__main__":
     flying_carpet = Flying_carpet(description_file)
     # run_IK_plannedData(flying_carpet)
     # check_jacobian_robustness(flying_carpet)
-    check_jacobian_robustness_different_weight()
+    # check_jacobian_robustness_different_weight()
     # run_IK_plannedData_different_weight(flying_carpet)
 
-    # visualize_starting_target(flying_carpet)
+    visualize_starting_target(flying_carpet)
     # check_IK_single(flying_carpet)
     # check_jacobian_robustness(flying_carpet)
     # generate_check_data(flying_carpet)

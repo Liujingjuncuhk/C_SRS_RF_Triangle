@@ -94,7 +94,9 @@ def plot_FKD_results(c_srs: C_SRS_fixedEnd ):
     cable_force_list = data['cable_force_list']
     vert_list = data['vert_list']
     residual_list = data['residual_list']
-    residual_norm = [np.linalg.norm(res)/(3*c_srs.nMoving) for res in residual_list]
+    residual_norm = [np.linalg.norm(res)/(c_srs.num_vertices) for res in residual_list]
+    # print("max residual norm: ", max(residual_norm))
+    # exit(0)
 
 
     # in a subplot, plot dense_cl_list and cl_return_list for each cable
